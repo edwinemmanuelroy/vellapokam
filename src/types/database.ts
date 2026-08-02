@@ -29,6 +29,13 @@ export type SosRequest = {
   people_count: number;
   needs: string[];
   status: SosStatus;
+  /**
+   * Set when a member of the public reports the rescue as complete. The
+   * request stays `pending` until an operator confirms — the public cannot
+   * write `status` at all (see migration 00008).
+   */
+  rescue_reported_at: string | null;
+  rescue_reported_note: string | null;
 };
 
 /* ── Supabase-compatible Insert shapes ───────────────────────────────────── */
@@ -54,6 +61,8 @@ export type SosRequestInsert = {
   people_count: number;
   needs: string[];
   status?: SosStatus;
+  rescue_reported_at?: string | null;
+  rescue_reported_note?: string | null;
 };
 
 export type AdvisoryType = "critical" | "warning" | "info";
