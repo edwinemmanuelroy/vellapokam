@@ -33,30 +33,40 @@ body {
 
 /* ─── Component layer ──────────────────────────────────────────────────────── */
 @layer components {
-  /* Glassmorphic card */
+  /* Flat panel — the single card treatment used everywhere */
   .card-glass {
-    @apply rounded-xl border border-surface-700/40 bg-surface-900/60 backdrop-blur-md shadow-lg;
+    @apply rounded-lg border border-surface-800 bg-surface-900;
   }
 
-  /* Emergency badge pulsing glow */
+  /* SOS badge — red is reserved for danger signals */
   .badge-sos {
-    @apply inline-flex items-center gap-1.5 rounded-full bg-emergency-600/20 px-3 py-1 text-xs font-semibold uppercase tracking-wider text-emergency-400 ring-1 ring-emergency-500/30 animate-pulse-emergency;
+    @apply inline-flex items-center gap-1.5 rounded-sm border border-emergency-600/50 bg-emergency-950/60 px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-widest text-emergency-400 animate-pulse-emergency;
   }
 
   /* Stat card used in the header row */
   .stat-card {
-    @apply card-glass flex flex-col gap-1 p-4 transition-transform duration-200 hover:scale-[1.03];
+    @apply card-glass flex flex-col gap-1 p-4;
   }
 
-  /* Water level indicator bar */
+  /* Panel micro-label: uppercase tracked caption used for all section titles */
+  .panel-label {
+    @apply text-[10px] font-bold uppercase tracking-widest text-surface-400;
+  }
+
+  /* Source chip: LIVE / MODEL / EST markers in panel headers */
+  .source-chip {
+    @apply rounded-sm border border-surface-700 px-1 py-px font-mono text-[8px] font-bold uppercase tracking-wider text-surface-500;
+  }
+
+  /* Water level indicator bar — gray until it means danger */
   .water-level-bar {
     @apply h-2 rounded-full;
   }
   .water-level-bar[data-level="ankle"] {
-    @apply bg-blue-400 w-1/4;
+    @apply bg-surface-500 w-1/4;
   }
   .water-level-bar[data-level="knee"] {
-    @apply bg-blue-500 w-2/4;
+    @apply bg-surface-300 w-2/4;
   }
   .water-level-bar[data-level="waist"] {
     @apply bg-warning-500 w-3/4;
@@ -71,4 +81,63 @@ body {
   .text-balance {
     text-wrap: balance;
   }
+
+  /* Scrollable without a visible bar — used by the map's layer chip strip,
+     where the global 6px scrollbar ate into an already tight row. */
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* ─── SOS beacon pulse animation (used by Leaflet DivIcon markers) ─────────── */
+@keyframes sos-ping {
+  0%   { transform: scale(1);   opacity: 0.7; }
+  75%  { transform: scale(1.8); opacity: 0; }
+  100% { transform: scale(1.8); opacity: 0; }
+}
+
+/* ─── Remove Leaflet's default marker icon background artifacts ─────────────── */
+.flood-marker,
+.sos-marker,
+.dam-marker,
+.river-marker,
+.picker-marker {
+  background: transparent !important;
+  border: none !important;
+}
+
+/* ─── Style Leaflet popups to match the dark theme ─────────────────────────── */
+.leaflet-popup-content-wrapper {
+  background: #141517 !important;
+  color: #e9ecef !important;
+  border-radius: 8px !important;
+  border: 1px solid #343a40 !important;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5) !important;
+}
+.leaflet-popup-tip {
+  background: #141517 !important;
+  border: 1px solid #343a40 !important;
+  box-shadow: none !important;
+}
+.leaflet-popup-close-button {
+  color: #868e96 !important;
+  font-size: 18px !important;
+}
+.leaflet-popup-close-button:hover {
+  color: #e9ecef !important;
+}
+
+/* Attribution control: keep it readable but unobtrusive on the dark basemap.
+   OSMF policy requires the attribution stays visible — never hide this. */
+.leaflet-control-attribution {
+  background: rgba(13, 14, 16, 0.8) !important;
+  color: #868e96 !important;
+  font-size: 10px !important;
+}
+.leaflet-control-attribution a {
+  color: #adb5bd !important;
 }

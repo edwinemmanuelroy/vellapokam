@@ -71,11 +71,19 @@ const config: Config = {
           "70%":  { boxShadow: "0 0 0 12px rgba(250, 82, 82, 0)" },
           "100%": { boxShadow: "0 0 0 0 rgba(250, 82, 82, 0)" },
         },
+        /* Ticker scroll. Two identical copies sit side by side, so shifting
+           by exactly half the track puts copy 2 where copy 1 began — the loop
+           is seamless with no jump. Duration is set inline per message. */
+        "marquee": {
+          "0%":   { transform: "translateX(0)" },
+          "100%": { transform: "translateX(-50%)" },
+        },
       },
       animation: {
         "pulse-emergency": "pulse-emergency 1.5s ease-in-out infinite",
         "slide-up": "slide-up 0.4s ease-out",
         "beacon": "beacon 1.5s ease-out infinite",
+        "marquee": "marquee linear infinite",
       },
     },
   },

@@ -1,25 +1,21 @@
 "use client";
 
 import React, { useState, useRef, useCallback, useEffect } from "react";
+import dynamic from "next/dynamic";
 import imageCompression from "browser-image-compression";
-import { supabase } from "@/lib/supabaseClient";
+import { supabase, isSupabaseConfigured } from "@/lib/supabaseClient";
+
+const LocationPickerMap = dynamic(() => import("./LocationPickerMap"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-44 w-full items-center justify-center rounded-xl border border-surface-700 bg-surface-950 text-xs text-surface-500">
+      <Loader2 className="h-5 w-5 animate-spin mr-2" />
+      Loading location map…
+    </div>
+  ),
+});
 import type { FloodReport, SosRequest, WaterLevel } from "@/types/database";
-import {
-  X,
-  Droplets,
-  LifeBuoy,
-  MapPin,
-  Loader2,
-  Camera,
-  Upload,
-  Check,
-  AlertTriangle,
-  Waves,
-  Users,
-  Phone,
-  User,
-  Crosshair,
-} from "lucide-react";
+import { X, Loader2, Upload, Check, Crosshair } from "lucide-react";
 
 /* ════════════════════════════════════════════════════════════════════════════
    Types
@@ -27,6 +23,8 @@ import {
 
 interface ReportModalProps {
   open: boolean;
+  /** Tab to show when the modal opens. Defaults to "sos" — the primary action. */
+  initialTab?: Tab;
   onClose: () => void;
   onFloodReportCreated: (report: FloodReport) => void;
   onSosCreated: (sos: SosRequest) => void;
@@ -34,14 +32,47 @@ interface ReportModalProps {
 
 type Tab = "flood" | "sos";
 
-const WATER_LEVELS: { value: WaterLevel; label: string; icon: string; desc: string }[] = [
-  { value: "ankle", label: "Ankle",  icon: "🌊", desc: "Water at ankle height" },
-  { value: "knee",  label: "Knee",   icon: "🌊🌊", desc: "Water at knee height" },
-  { value: "waist", label: "Waist",  icon: "🌊🌊🌊", desc: "Water at waist height" },
-  { value: "roof",  label: "Roof",   icon: "🏠🌊", desc: "Water near or above roof" },
+const WATER_LEVELS: { value: WaterLevel; label: string; steps: number; desc: string }[] = [
+  { value: "ankle", label: "Ankle", steps: 1, desc: "Water at ankle height" },
+  { value: "knee",  label: "Knee",  steps: 2, desc: "Water at knee height" },
+  { value: "waist", label: "Waist", steps: 3, desc: "Water at waist height" },
+  { value: "roof",  label: "Roof",  steps: 4, desc: "Water near or above roof" },
 ];
 
+/** Rising-bar glyph for the water-level picker: 4 steps, filled = severity. */
+function LevelGlyph({ steps, active }: { steps: number; active: boolean }) {
+  const fillColor =
+    steps === 4
+      ? "bg-emergency-500"
+      : steps === 3
+      ? "bg-warning-500"
+      : active
+      ? "bg-surface-200"
+      : "bg-surface-400";
+  return (
+    <span className="flex items-end gap-0.5" aria-hidden>
+      {[1, 2, 3, 4].map((i) => (
+        <span
+          key={i}
+          style={{ height: `${4 + i * 3}px` }}
+          className={`w-1 rounded-sm ${i <= steps ? fillColor : "bg-surface-700"}`}
+        />
+      ))}
+    </span>
+  );
+}
+
 const NEED_OPTIONS = ["Food", "Water", "Medical", "Rescue"] as const;
+
+/** Anti-spam throttle between submissions, in seconds. */
+const COOLDOWN_SECONDS = 30;
+
+/** Bounds that mirror the database columns and keep payloads sane. */
+const MAX_DESCRIPTION_LENGTH = 500;
+const MAX_NAME_LENGTH = 80;
+
+/** Rejected before compression so a huge file never reaches the browser worker. */
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
 /* ════════════════════════════════════════════════════════════════════════════
    GPS helper
@@ -83,15 +114,26 @@ function useGeoLocation() {
 
 export default function ReportModal({
   open,
+  initialTab = "sos",
   onClose,
   onFloodReportCreated,
   onSosCreated,
 }: ReportModalProps) {
   /* ── Shared state ─────────────────────────────────────────────────────── */
-  const [tab, setTab] = useState<Tab>("flood");
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Land on the tab the caller asked for each time the dialog opens — the SOS
+  // button must always open directly onto the SOS form.
+  useEffect(() => {
+    if (open) {
+      setTab(initialTab);
+      setFormError(null);
+      setSuccess(false);
+    }
+  }, [open, initialTab]);
 
   /* ── Anti-Spam States ─────────────────────────────────────────────────── */
   const [honeypot, setHoneypot] = useState("");
@@ -100,23 +142,43 @@ export default function ReportModal({
   /* ── Check Active Cooldown ────────────────────────────────────────────── */
   useEffect(() => {
     const last = localStorage.getItem("last_submission_time");
-    if (last) {
-      const diff = Math.floor((Date.now() - parseInt(last)) / 1000);
-      if (diff < 30) {
-        setCooldown(30 - diff);
-        const interval = setInterval(() => {
-          setCooldown((c) => {
-            if (c <= 1) {
-              clearInterval(interval);
-              return 0;
-            }
-            return c - 1;
-          });
-        }, 1000);
-        return () => clearInterval(interval);
-      }
-    }
-  }, [success]);
+    if (!last) return;
+    const startedAt = parseInt(last, 10);
+    if (!Number.isFinite(startedAt)) return;
+
+    const diff = Math.floor((Date.now() - startedAt) / 1000);
+    if (diff < 0 || diff >= COOLDOWN_SECONDS) return;
+
+    setCooldown(COOLDOWN_SECONDS - diff);
+    const interval = setInterval(() => {
+      setCooldown((c) => {
+        if (c <= 1) {
+          clearInterval(interval);
+          return 0;
+        }
+        return c - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [success, open]);
+
+  /* ── Dialog behaviour: Escape to close, lock background scroll ────────── */
+  useEffect(() => {
+    if (!open) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [open, onClose]);
 
   /* ── Flood form state ─────────────────────────────────────────────────── */
   const [waterLevel, setWaterLevel] = useState<WaterLevel>("ankle");
@@ -137,6 +199,19 @@ export default function ReportModal({
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      setFormError("Please choose an image file.");
+      e.target.value = "";
+      return;
+    }
+    if (file.size > MAX_IMAGE_BYTES) {
+      setFormError("That photo is larger than 20MB. Please choose a smaller one.");
+      e.target.value = "";
+      return;
+    }
+
+    setFormError(null);
     setImageFile(file);
     const reader = new FileReader();
     reader.onloadend = () => setImagePreview(reader.result as string);
@@ -176,7 +251,13 @@ export default function ReportModal({
   };
 
   /* ── Upload image to Supabase Storage with compression ────────────────── */
-  const uploadImage = async (file: File): Promise<string | null> => {
+  /**
+   * Returns an explicit error instead of null so a failed upload can be shown
+   * to the reporter rather than silently dropping their photo evidence.
+   */
+  const uploadImage = async (
+    file: File
+  ): Promise<{ url: string } | { error: string }> => {
     let uploadFile = file;
 
     // Apply compression if image is > 500KB
@@ -193,23 +274,26 @@ export default function ReportModal({
       }
     }
 
-    const ext = uploadFile.name.split(".").pop() ?? "jpg";
+    const ext = (uploadFile.name.split(".").pop() ?? "jpg").toLowerCase();
     const path = `reports/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
 
-    const { error } = await supabase.storage
-      .from("flood-photos")
-      .upload(path, uploadFile, { cacheControl: "3600", upsert: false });
+    try {
+      const { error } = await supabase.storage
+        .from("flood-photos")
+        .upload(path, uploadFile, { cacheControl: "3600", upsert: false });
 
-    if (error) {
-      console.error("Storage upload error:", error);
-      return null;
+      if (error) {
+        console.error("Storage upload error:", error);
+        return { error: error.message };
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Network error";
+      return { error: msg };
     }
 
-    const { data } = supabase.storage
-      .from("flood-photos")
-      .getPublicUrl(path);
+    const { data } = supabase.storage.from("flood-photos").getPublicUrl(path);
 
-    return data.publicUrl;
+    return { url: data.publicUrl };
   };
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -234,43 +318,56 @@ export default function ReportModal({
       return;
     }
 
+    if (!isSupabaseConfigured) {
+      setFormError("Supabase is not configured yet. Please create a .env.local file with your NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.");
+      return;
+    }
+
     setSubmitting(true);
     setFormError(null);
 
-    let imageUrl: string | null = null;
-    if (imageFile) {
-      imageUrl = await uploadImage(imageFile);
-    }
+    try {
+      let imageUrl: string | null = null;
+      if (imageFile) {
+        const upload = await uploadImage(imageFile);
+        if ("error" in upload) {
+          setFormError(
+            `Photo upload failed: ${upload.error}. Remove the photo to submit the report without it.`
+          );
+          return;
+        }
+        imageUrl = upload.url;
+      }
 
-    // Optimistic object
-    const optimistic: FloodReport = {
-      id: crypto.randomUUID(),
-      created_at: new Date().toISOString(),
-      latitude: floodGeo.lat,
-      longitude: floodGeo.lng,
-      water_level: waterLevel,
-      description,
-      image_url: imageUrl,
-      verified: false,
-    };
+      const { data, error } = await supabase
+        .from("flood_reports")
+        .insert({
+          latitude: floodGeo.lat,
+          longitude: floodGeo.lng,
+          water_level: waterLevel,
+          description: description.trim(),
+          image_url: imageUrl,
+          verified: false,
+        })
+        .select()
+        .single();
 
-    // Optimistic update
-    onFloodReportCreated(optimistic);
+      if (error) {
+        setFormError(error.message);
+        return;
+      }
 
-    const { error } = await supabase.from("flood_reports").insert({
-      latitude: floodGeo.lat,
-      longitude: floodGeo.lng,
-      water_level: waterLevel,
-      description,
-      image_url: imageUrl,
-      verified: false,
-    });
-
-    setSubmitting(false);
-
-    if (error) {
-      setFormError(error.message);
+      // The row is added from the server response, so it carries the real
+      // database id. Adding a client-generated row here instead would leave a
+      // duplicate once the realtime INSERT arrives, and a permanent ghost card
+      // whenever the insert failed.
+      if (data) onFloodReportCreated(data as FloodReport);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Network error";
+      setFormError(`Connection Error: ${msg}. Make sure your Supabase project URL in .env.local is valid and online.`);
       return;
+    } finally {
+      setSubmitting(false);
     }
 
     // Set last submission timestamp for cooldown
@@ -307,45 +404,53 @@ export default function ReportModal({
       setFormError("Please enter a phone number.");
       return;
     }
+    const phoneDigits = sosPhone.replace(/[\s\-+]/g, "");
+    if (!/^[6-9]\d{9}$/.test(phoneDigits)) {
+      setFormError("Please enter a valid 10-digit Indian mobile number.");
+      return;
+    }
     if (sosGeo.lat === null || sosGeo.lng === null) {
       setFormError("Please detect your GPS location first.");
+      return;
+    }
+
+    if (!isSupabaseConfigured) {
+      setFormError("Supabase is not configured yet. Please create a .env.local file with your NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.");
       return;
     }
 
     setSubmitting(true);
     setFormError(null);
 
-    // Optimistic object
-    const optimistic: SosRequest = {
-      id: crypto.randomUUID(),
-      created_at: new Date().toISOString(),
-      name: sosName.trim(),
-      phone: sosPhone.trim(),
-      latitude: sosGeo.lat,
-      longitude: sosGeo.lng,
-      people_count: sosPeople,
-      needs: sosNeeds,
-      status: "pending",
-    };
+    try {
+      const { data, error } = await supabase
+        .from("sos_requests")
+        .insert({
+          name: sosName.trim(),
+          phone: sosPhone.trim(),
+          latitude: sosGeo.lat,
+          longitude: sosGeo.lng,
+          people_count: sosPeople,
+          needs: sosNeeds,
+          status: "pending",
+        })
+        .select()
+        .single();
 
-    // Optimistic update
-    onSosCreated(optimistic);
+      if (error) {
+        setFormError(error.message);
+        return;
+      }
 
-    const { error } = await supabase.from("sos_requests").insert({
-      name: sosName.trim(),
-      phone: sosPhone.trim(),
-      latitude: sosGeo.lat,
-      longitude: sosGeo.lng,
-      people_count: sosPeople,
-      needs: sosNeeds,
-      status: "pending",
-    });
-
-    setSubmitting(false);
-
-    if (error) {
-      setFormError(error.message);
+      // Added from the server response so the id matches the realtime event —
+      // no duplicate card, and no ghost SOS left behind on a failed insert.
+      if (data) onSosCreated(data as SosRequest);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Network error";
+      setFormError(`Connection Error: ${msg}. Make sure your Supabase project URL in .env.local is valid and online.`);
       return;
+    } finally {
+      setSubmitting(false);
     }
 
     // Set last submission timestamp for cooldown
@@ -373,15 +478,23 @@ export default function ReportModal({
       />
 
       {/* Modal panel */}
-      <div className="relative z-10 w-full max-w-lg animate-slide-up rounded-t-2xl border border-surface-700/50 bg-surface-900 shadow-2xl sm:rounded-2xl">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="report-modal-title"
+        className="relative z-10 w-full max-w-lg animate-slide-up rounded-t-2xl border border-surface-700/50 bg-surface-900 shadow-2xl sm:rounded-2xl"
+      >
         {/* ── Header ───────────────────────────────────────────────────── */}
         <div className="flex items-center justify-between border-b border-surface-800 px-5 py-4">
-          <h2 className="flex items-center gap-2 text-lg font-bold text-surface-100">
-            <AlertTriangle className="h-5 w-5 text-emergency-400" />
+          <h2
+            id="report-modal-title"
+            className="text-base font-bold uppercase tracking-wider text-surface-100"
+          >
             Report Incident
           </h2>
           <button
             onClick={handleClose}
+            aria-label="Close report dialog"
             className="flex h-8 w-8 items-center justify-center rounded-lg text-surface-500 transition hover:bg-surface-800 hover:text-surface-200"
           >
             <X className="h-5 w-5" />
@@ -392,24 +505,22 @@ export default function ReportModal({
         <div className="flex border-b border-surface-800">
           <button
             onClick={() => { setTab("flood"); setFormError(null); setSuccess(false); }}
-            className={`flex flex-1 items-center justify-center gap-2 py-3 text-sm font-semibold transition ${
+            className={`flex flex-1 items-center justify-center py-3 text-sm font-semibold uppercase tracking-wider transition ${
               tab === "flood"
-                ? "border-b-2 border-blue-500 text-blue-400"
+                ? "border-b-2 border-surface-200 text-surface-100"
                 : "text-surface-500 hover:text-surface-300"
             }`}
           >
-            <Droplets className="h-4 w-4" />
-            Report Flood Level
+            Flood Level
           </button>
           <button
             onClick={() => { setTab("sos"); setFormError(null); setSuccess(false); }}
-            className={`flex flex-1 items-center justify-center gap-2 py-3 text-sm font-semibold transition ${
+            className={`flex flex-1 items-center justify-center py-3 text-sm font-semibold uppercase tracking-wider transition ${
               tab === "sos"
                 ? "border-b-2 border-emergency-500 text-emergency-400"
                 : "text-surface-500 hover:text-surface-300"
             }`}
           >
-            <LifeBuoy className="h-4 w-4" />
             SOS / Need Help
           </button>
         </div>
@@ -419,8 +530,8 @@ export default function ReportModal({
           {/* ── Success state ────────────────────────────────────────── */}
           {success ? (
             <div className="flex flex-col items-center gap-3 py-10 text-center">
-              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-600/20">
-                <Check className="h-7 w-7 text-emerald-400" />
+              <div className="flex h-14 w-14 items-center justify-center rounded-full border border-surface-600 bg-surface-800">
+                <Check className="h-7 w-7 text-surface-100" />
               </div>
               <p className="text-lg font-bold text-surface-100">
                 {tab === "flood" ? "Flood Report Submitted" : "SOS Request Sent"}
@@ -448,8 +559,7 @@ export default function ReportModal({
 
               {/* Water level radios */}
               <div>
-                <label className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-surface-200">
-                  <Waves className="h-4 w-4 text-blue-400" />
+                <label className="mb-2 block text-sm font-semibold text-surface-200">
                   Water Level
                 </label>
                 <div className="grid grid-cols-2 gap-2">
@@ -458,13 +568,13 @@ export default function ReportModal({
                       key={wl.value}
                       type="button"
                       onClick={() => setWaterLevel(wl.value)}
-                      className={`flex flex-col items-start rounded-lg border p-3 text-left transition ${
+                      className={`flex flex-col items-start gap-1 rounded-lg border p-3 text-left transition ${
                         waterLevel === wl.value
-                          ? "border-blue-500 bg-blue-500/10 text-blue-300"
+                          ? "border-surface-300 bg-surface-800 text-surface-100"
                           : "border-surface-700 bg-surface-850 text-surface-400 hover:border-surface-600 hover:text-surface-300"
                       }`}
                     >
-                      <span className="text-base">{wl.icon}</span>
+                      <LevelGlyph steps={wl.steps} active={waterLevel === wl.value} />
                       <span className="text-sm font-semibold">{wl.label}</span>
                       <span className="text-[11px] opacity-70">{wl.desc}</span>
                     </button>
@@ -481,15 +591,15 @@ export default function ReportModal({
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   rows={3}
+                  maxLength={MAX_DESCRIPTION_LENGTH}
                   placeholder="Describe the flooding situation…"
-                  className="w-full resize-none rounded-lg border border-surface-700 bg-surface-850 px-3 py-2.5 text-sm text-surface-200 placeholder-surface-600 outline-none transition focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30"
+                  className="w-full resize-none rounded-lg border border-surface-700 bg-surface-850 px-3 py-2.5 text-sm text-surface-200 placeholder-surface-600 outline-none transition focus:border-surface-400"
                 />
               </div>
 
               {/* Image upload */}
               <div>
-                <label className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-surface-200">
-                  <Camera className="h-4 w-4 text-surface-400" />
+                <label className="mb-2 block text-sm font-semibold text-surface-200">
                   Photo (optional)
                 </label>
                 {imagePreview ? (
@@ -517,11 +627,12 @@ export default function ReportModal({
                     Click to upload a photo
                   </button>
                 )}
+                {/* No `capture` attribute — it forces the camera on mobile and
+                    blocks picking an already-taken photo from the gallery. */}
                 <input
                   ref={floodFileRef}
                   type="file"
                   accept="image/*"
-                  capture="environment"
                   className="hidden"
                   onChange={handleImageChange}
                 />
@@ -547,38 +658,40 @@ export default function ReportModal({
 
               {/* Name */}
               <div>
-                <label className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-surface-200">
-                  <User className="h-4 w-4 text-surface-400" />
+                <label className="mb-2 block text-sm font-semibold text-surface-200">
                   Your Name
                 </label>
                 <input
                   type="text"
                   value={sosName}
                   onChange={(e) => setSosName(e.target.value)}
+                  maxLength={MAX_NAME_LENGTH}
+                  autoComplete="name"
                   placeholder="Full name"
-                  className="w-full rounded-lg border border-surface-700 bg-surface-850 px-3 py-2.5 text-sm text-surface-200 placeholder-surface-600 outline-none transition focus:border-emergency-500 focus:ring-1 focus:ring-emergency-500/30"
+                  className="w-full rounded-lg border border-surface-700 bg-surface-850 px-3 py-2.5 text-sm text-surface-200 placeholder-surface-600 outline-none transition focus:border-surface-400"
                 />
               </div>
 
               {/* Phone */}
               <div>
-                <label className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-surface-200">
-                  <Phone className="h-4 w-4 text-surface-400" />
+                <label className="mb-2 block text-sm font-semibold text-surface-200">
                   Phone Number
                 </label>
                 <input
                   type="tel"
+                  inputMode="tel"
+                  autoComplete="tel"
+                  maxLength={20}
                   value={sosPhone}
                   onChange={(e) => setSosPhone(e.target.value)}
                   placeholder="+91 XXXXX XXXXX"
-                  className="w-full rounded-lg border border-surface-700 bg-surface-850 px-3 py-2.5 text-sm text-surface-200 placeholder-surface-600 outline-none transition focus:border-emergency-500 focus:ring-1 focus:ring-emergency-500/30"
+                  className="w-full rounded-lg border border-surface-700 bg-surface-850 px-3 py-2.5 font-mono text-sm text-surface-200 placeholder-surface-600 outline-none transition focus:border-surface-400"
                 />
               </div>
 
               {/* People count */}
               <div>
-                <label className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-surface-200">
-                  <Users className="h-4 w-4 text-surface-400" />
+                <label className="mb-2 block text-sm font-semibold text-surface-200">
                   Number of Trapped People
                 </label>
                 <div className="flex items-center gap-3">
@@ -617,18 +730,18 @@ export default function ReportModal({
                         onClick={() => toggleNeed(need)}
                         className={`flex items-center gap-2 rounded-lg border px-3 py-2.5 text-sm font-medium transition ${
                           active
-                            ? "border-emergency-600 bg-emergency-600/15 text-emergency-300"
+                            ? "border-surface-300 bg-surface-800 text-surface-100"
                             : "border-surface-700 bg-surface-850 text-surface-400 hover:border-surface-600 hover:text-surface-300"
                         }`}
                       >
                         <div
                           className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border ${
                             active
-                              ? "border-emergency-500 bg-emergency-500"
+                              ? "border-surface-200 bg-surface-200"
                               : "border-surface-600 bg-surface-800"
                           }`}
                         >
-                          {active && <Check className="h-3 w-3 text-white" />}
+                          {active && <Check className="h-3 w-3 text-surface-950" />}
                         </div>
                         {need}
                       </button>
@@ -645,8 +758,7 @@ export default function ReportModal({
 
         {/* ── Error banner ─────────────────────────────────────────────── */}
         {formError && (
-          <div className="mx-5 mb-3 flex items-center gap-2 rounded-lg border border-emergency-700/50 bg-emergency-950/60 px-3 py-2 text-xs text-emergency-300">
-            <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+          <div className="mx-5 mb-3 rounded-lg border border-emergency-700/50 bg-emergency-950/60 px-3 py-2 text-xs text-emergency-300">
             {formError}
           </div>
         )}
@@ -657,9 +769,9 @@ export default function ReportModal({
             <button
               onClick={tab === "flood" ? submitFloodReport : submitSos}
               disabled={submitting}
-              className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold uppercase tracking-wider transition disabled:opacity-60 ${
+              className={`flex w-full items-center justify-center gap-2 rounded-lg px-4 py-3 text-sm font-bold uppercase tracking-wider transition disabled:opacity-60 ${
                 tab === "flood"
-                  ? "bg-blue-600 text-white hover:bg-blue-500 active:bg-blue-700"
+                  ? "bg-surface-200 text-surface-950 hover:bg-surface-50"
                   : "bg-emergency-600 text-white hover:bg-emergency-500 active:bg-emergency-700"
               }`}
             >
@@ -669,15 +781,9 @@ export default function ReportModal({
                   Submitting…
                 </>
               ) : tab === "flood" ? (
-                <>
-                  <Droplets className="h-4 w-4" />
-                  Submit Flood Report
-                </>
+                "Submit Flood Report"
               ) : (
-                <>
-                  <LifeBuoy className="h-4 w-4" />
-                  Send SOS Request
-                </>
+                "Send SOS Request"
               )}
             </button>
           </div>
@@ -697,56 +803,43 @@ function GpsDetector({
   geo: ReturnType<typeof useGeoLocation>;
 }) {
   return (
-    <div>
-      <label className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-surface-200">
-        <MapPin className="h-4 w-4 text-surface-400" />
-        GPS Location
-      </label>
-
-      {geo.lat !== null && geo.lng !== null ? (
-        <div className="flex items-center gap-3">
-          <div className="flex-1 rounded-lg border border-emerald-700/40 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-300">
-            <span className="font-mono">
-              {geo.lat.toFixed(6)}, {geo.lng.toFixed(6)}
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={geo.detect}
-            disabled={geo.locating}
-            className="flex h-9 w-9 items-center justify-center rounded-lg border border-surface-700 bg-surface-850 text-surface-400 transition hover:text-surface-200"
-            title="Re-detect GPS"
-          >
-            {geo.locating ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Crosshair className="h-4 w-4" />
-            )}
-          </button>
-        </div>
-      ) : (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <label className="text-sm font-semibold text-surface-200">
+          Location & GPS Coordinates
+        </label>
         <button
           type="button"
           onClick={geo.detect}
           disabled={geo.locating}
-          className="flex w-full items-center justify-center gap-2 rounded-lg border-2 border-dashed border-surface-700 py-4 text-sm text-surface-500 transition hover:border-surface-500 hover:text-surface-300 disabled:opacity-60"
+          className="flex items-center gap-1 text-[11px] font-bold uppercase tracking-wider text-surface-300 hover:text-surface-100 disabled:opacity-60 transition"
         >
           {geo.locating ? (
             <>
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Detecting location…
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Detecting…
             </>
           ) : (
             <>
-              <Crosshair className="h-4 w-4" />
-              Auto-detect GPS Location
+              <Crosshair className="h-3 w-3" />
+              {geo.lat !== null ? "Re-detect GPS" : "Auto-detect GPS"}
             </>
           )}
         </button>
-      )}
+      </div>
+
+      {/* Mini Interactive Map Location Picker */}
+      <LocationPickerMap
+        lat={geo.lat}
+        lng={geo.lng}
+        onChange={(newLat, newLng) => {
+          geo.setLat(newLat);
+          geo.setLng(newLng);
+        }}
+      />
 
       {geo.error && (
-        <p className="mt-1.5 text-xs text-emergency-400">
+        <p className="text-xs text-emergency-400 font-medium">
           Location error: {geo.error}
         </p>
       )}

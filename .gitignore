@@ -11,6 +11,8 @@
 
 # next.js
 /.next/
+# verification builds run alongside a live dev server (NEXT_DIST_DIR)
+/.next-verify/
 /out/
 
 # production

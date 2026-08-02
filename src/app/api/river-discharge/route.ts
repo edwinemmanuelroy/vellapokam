@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { fetchKeralaAlerts } from "@/lib/sachet";
+import type { OfficialAlert } from "@/types/hydromet";
 
 export const revalidate = 900; // 15-minute revalidation cache
 
@@ -28,81 +30,130 @@ const STATIONS: Station[] = [
   { id: "chandragiri", name: "Kasaragod Station", river: "Chandragiri River", lat: 12.4969, lng: 75.0022, dangerLevel: 800 },
 ];
 
-export async function GET() {
+interface StationReading {
+  discharge: number;
+  trend: "rising" | "falling" | "steady";
+  available: boolean;
+}
+
+const UNAVAILABLE: StationReading = { discharge: 0, trend: "steady", available: false };
+
+/**
+ * Daily river discharge for a station.
+ *
+ * `past_days=1` is required — without it the series starts at today, the
+ * lookup for yesterday falls back to today's own index, and the computed
+ * trend is permanently "steady".
+ *
+ * Never throws: a single unreachable station must not fail the whole endpoint.
+ */
+async function fetchDischarge(station: Station): Promise<StationReading> {
   try {
-    const results = await Promise.all(
-      STATIONS.map(async (station) => {
-        const url = `https://flood-api.open-meteo.com/v1/flood?latitude=${station.lat}&longitude=${station.lng}&daily=river_discharge&timezone=Asia%2FKolkata&models=seamless_v4`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`Failed to fetch data for ${station.name}`);
-        const data = await res.json();
+    const url = `https://flood-api.open-meteo.com/v1/flood?latitude=${station.lat}&longitude=${station.lng}&daily=river_discharge&timezone=Asia%2FKolkata&past_days=1&forecast_days=1&models=seamless_v4`;
+    const res = await fetch(url, { next: { revalidate: 900 } });
+    if (!res.ok) return UNAVAILABLE;
+    const data = await res.json();
 
-        const times = data.daily?.time as string[];
-        const discharges = data.daily?.river_discharge as number[];
+    const times = data?.daily?.time as string[] | undefined;
+    const discharges = data?.daily?.river_discharge as (number | null)[] | undefined;
+    if (!Array.isArray(times) || !Array.isArray(discharges) || times.length === 0) {
+      return UNAVAILABLE;
+    }
 
-        if (!times || !discharges || times.length === 0) {
-          return {
-            ...station,
-            discharge: 0,
-            trend: "steady",
-            status: "normal",
-            updatedAt: new Date().toISOString(),
-          };
-        }
+    // Local (Asia/Kolkata) date strings in YYYY-MM-DD form
+    const fmt = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Kolkata" });
+    const todayStr = fmt.format(new Date());
+    const yesterdayStr = fmt.format(new Date(Date.now() - 24 * 60 * 60 * 1000));
 
-        // Get local date string for today and yesterday in YYYY-MM-DD format
-        const todayStr = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Kolkata" }).format(new Date());
-        const yesterday = new Date();
-        yesterday.setDate(yesterday.getDate() - 1);
-        const yesterdayStr = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Kolkata" }).format(yesterday);
+    let todayIndex = times.indexOf(todayStr);
+    let yesterdayIndex = times.indexOf(yesterdayStr);
+    if (todayIndex === -1) todayIndex = times.length - 1;
+    if (yesterdayIndex === -1) yesterdayIndex = Math.max(0, todayIndex - 1);
 
-        // Find matching indices
-        let todayIndex = times.indexOf(todayStr);
-        let yesterdayIndex = times.indexOf(yesterdayStr);
+    const currentDischarge = discharges[todayIndex] ?? 0;
+    const pastDischarge = discharges[yesterdayIndex] ?? 0;
 
-        // Fallbacks if current date is not present in prediction series
-        if (todayIndex === -1) todayIndex = times.length - 1; // latest forecast
-        if (yesterdayIndex === -1) yesterdayIndex = Math.max(0, todayIndex - 1);
+    // Trend from the day-over-day percentage change (±2% threshold).
+    // Identical indices (single-day series) yield 0% → "steady".
+    let trend: "rising" | "falling" | "steady" = "steady";
+    if (yesterdayIndex !== todayIndex && pastDischarge > 0) {
+      const pctChange = ((currentDischarge - pastDischarge) / pastDischarge) * 100;
+      if (pctChange > 2) {
+        trend = "rising";
+      } else if (pctChange < -2) {
+        trend = "falling";
+      }
+    }
 
-        const currentDischarge = discharges[todayIndex] ?? 0;
-        const pastDischarge = discharges[yesterdayIndex] ?? 0;
+    return { discharge: currentDischarge, trend, available: true };
+  } catch {
+    return UNAVAILABLE;
+  }
+}
 
-        // Compute trend
-        let trend: "rising" | "falling" | "steady" = "steady";
-        const difference = currentDischarge - pastDischarge;
-        // Significant difference threshold (e.g. > 2.0% change)
-        const pctChange = pastDischarge > 0 ? (difference / pastDischarge) * 100 : 0;
-        
-        if (pctChange > 2) {
-          trend = "rising";
-        } else if (pctChange < -2) {
-          trend = "falling";
-        }
+/**
+ * The official flood alert covering a station, if any. Alerts arrive via
+ * SACHET (CWC flood forecasts relayed by IMD/SDMA) and name the river in
+ * their area text; `alert.rivers` holds our matched station ids.
+ */
+function officialAlertFor(
+  station: Station,
+  alerts: OfficialAlert[] | null
+): OfficialAlert | null {
+  if (!alerts) return null;
+  const floodish = alerts.filter(
+    (a) => /flood|river|dam/i.test(a.event) || a.rivers.length > 0
+  );
+  return floodish.find((a) => a.rivers.includes(station.id)) ?? null;
+}
 
-        // Compute status based on danger level
-        let status: "normal" | "warning" | "danger" = "normal";
-        if (currentDischarge >= station.dangerLevel) {
+export async function GET() {
+  // Official flood alerts overlay the model — an active CWC/SDMA river alert
+  // outranks anything the discharge model says about that river.
+  const alerts = await fetchKeralaAlerts();
+
+  const results = await Promise.all(
+    STATIONS.map(async (station) => {
+      const reading = await fetchDischarge(station);
+
+      let status: "normal" | "warning" | "danger" = "normal";
+      if (reading.available) {
+        if (reading.discharge >= station.dangerLevel) {
           status = "danger";
-        } else if (currentDischarge >= station.dangerLevel * 0.7) {
+        } else if (reading.discharge >= station.dangerLevel * 0.7) {
           status = "warning";
         }
+      }
 
-        return {
-          ...station,
-          discharge: currentDischarge,
-          trend,
-          status,
-          updatedAt: new Date().toISOString(),
-        };
-      })
-    );
+      const alert = officialAlertFor(station, alerts);
+      if (alert) {
+        // Escalate only — never let the model downgrade an official warning.
+        const officialStatus =
+          alert.severity === "red" || alert.severity === "orange"
+            ? "danger"
+            : "warning";
+        if (officialStatus === "danger" || status === "normal") {
+          status = officialStatus;
+        }
+      }
 
-    return NextResponse.json({ success: true, stations: results });
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : "Failed to fetch river discharge warning metrics";
-    return NextResponse.json(
-      { success: false, error: msg },
-      { status: 500 }
-    );
-  }
+      return {
+        ...station,
+        discharge: reading.discharge,
+        trend: reading.trend,
+        status,
+        available: reading.available,
+        officialAlert: alert
+          ? {
+              source: alert.source,
+              severity: alert.severity,
+              message: alert.message.slice(0, 280),
+            }
+          : null,
+        updatedAt: new Date().toISOString(),
+      };
+    })
+  );
+
+  return NextResponse.json({ success: true, stations: results });
 }

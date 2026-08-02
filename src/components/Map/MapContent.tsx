@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import {
   MapContainer,
   TileLayer,
@@ -10,15 +10,16 @@ import {
 } from "react-leaflet";
 import L from "leaflet";
 import type { FloodReport, SosRequest } from "@/types/database";
+import type { DamStation, RiverStation } from "@/types/hydromet";
 import {
-  Clock,
-  MapPin,
-  Users,
-  Phone,
-  ShieldCheck,
-  Eye,
-  Waves,
-} from "lucide-react";
+  TILE_URL,
+  TILE_ATTRIBUTION,
+  TILE_MIN_ZOOM,
+  TILE_MAX_ZOOM,
+  KERALA_BOUNDS,
+} from "@/lib/mapConfig";
+import { formatRelativeTime } from "@/lib/format";
+import { Crosshair } from "lucide-react";
 
 /* ════════════════════════════════════════════════════════════════════════════
    Constants
@@ -27,37 +28,85 @@ import {
 const KERALA_CENTER: [number, number] = [10.8505, 76.2711];
 const DEFAULT_ZOOM = 8;
 
+/* Signal palette — the only colors on the map besides grayscale.
+   red = danger/SOS/spill · amber = warning · bright gray = elevated · gray = normal */
+const SIGNAL = {
+  danger: "#fa5252",   // emergency-500
+  warning: "#fcc419",  // warning-500
+  elevated: "#dee2e6", // surface-200
+  normal: "#868e96",   // surface-500
+} as const;
+
+function damColor(alertColor: string): string {
+  switch (alertColor) {
+    case "red": return SIGNAL.danger;
+    case "orange": return SIGNAL.warning;
+    case "blue": return SIGNAL.elevated;
+    default: return SIGNAL.normal;
+  }
+}
+
+function riverColor(status: string): string {
+  switch (status) {
+    case "danger": return SIGNAL.danger;
+    case "warning": return SIGNAL.warning;
+    default: return SIGNAL.normal;
+  }
+}
+
+function floodColor(waterLevel: string): string {
+  switch (waterLevel) {
+    case "roof": return SIGNAL.danger;
+    case "waist": return SIGNAL.warning;
+    case "knee": return SIGNAL.elevated;
+    default: return SIGNAL.normal;
+  }
+}
+
 /* ════════════════════════════════════════════════════════════════════════════
-   Custom SVG marker icons
+   Geometric marker icons — monochrome + signal color, no emoji
+
+   Each factory is memoised on its inputs. A fresh DivIcon instance makes
+   react-leaflet tear the marker down and re-add it, so rebuilding icons every
+   render caused the whole marker layer to churn on each realtime update.
+
+   Shape language: teardrop pin = flood report · pulsing dot = SOS ·
+   square = dam · circle = river gauge.
    ════════════════════════════════════════════════════════════════════════════ */
 
-function createFloodIcon(waterLevel: string): L.DivIcon {
-  const colorMap: Record<string, { fill: string; ring: string }> = {
-    ankle: { fill: "#fbbf24", ring: "#fde68a" },  // yellow
-    knee:  { fill: "#f97316", ring: "#fdba74" },   // orange
-    waist: { fill: "#ea580c", ring: "#fb923c" },   // dark orange
-    roof:  { fill: "#b91c1c", ring: "#fca5a5" },   // dark red
+function memoizeIcon<A extends unknown[]>(
+  key: (...args: A) => string,
+  build: (...args: A) => L.DivIcon
+): (...args: A) => L.DivIcon {
+  const cache = new Map<string, L.DivIcon>();
+  return (...args: A) => {
+    const k = key(...args);
+    const hit = cache.get(k);
+    if (hit) return hit;
+    const icon = build(...args);
+    cache.set(k, icon);
+    return icon;
   };
-  const c = colorMap[waterLevel] ?? colorMap.ankle;
+}
 
+function buildFloodIcon(waterLevel: string): L.DivIcon {
+  const fill = floodColor(waterLevel);
   return L.divIcon({
     className: "flood-marker",
-    iconSize: [28, 36],
-    iconAnchor: [14, 36],
-    popupAnchor: [0, -38],
+    iconSize: [24, 32],
+    iconAnchor: [12, 32],
+    popupAnchor: [0, -34],
     html: `
-      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 28 36" fill="none">
-        <path d="M14 0C6.268 0 0 6.268 0 14c0 10.5 14 22 14 22s14-11.5 14-22C28 6.268 21.732 0 14 0z"
-              fill="${c.fill}" stroke="${c.ring}" stroke-width="1.5"/>
-        <circle cx="14" cy="13" r="5" fill="white" opacity="0.9"/>
-        <path d="M11 14.5 C12 11, 16 11, 17 14.5" stroke="${c.fill}" stroke-width="1.8"
-              stroke-linecap="round" fill="none"/>
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="32" viewBox="0 0 24 32" fill="none">
+        <path d="M12 0C5.373 0 0 5.373 0 12c0 9 12 20 12 20s12-11 12-20C24 5.373 18.627 0 12 0z"
+              fill="${fill}" stroke="#0d0e10" stroke-width="1.5"/>
+        <circle cx="12" cy="11.5" r="4" fill="#0d0e10"/>
       </svg>
     `,
   });
 }
 
-function createSosIcon(peopleCount: number): L.DivIcon {
+function buildSosIcon(peopleCount: number): L.DivIcon {
   return L.divIcon({
     className: "sos-marker",
     iconSize: [40, 40],
@@ -72,26 +121,26 @@ function createSosIcon(peopleCount: number): L.DivIcon {
         <div style="
           position: absolute; inset: 0;
           border-radius: 50%;
-          background: rgba(220, 38, 38, 0.25);
+          background: rgba(250, 82, 82, 0.25);
           animation: sos-ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
         "></div>
         <div style="
           position: absolute; inset: 4px;
           border-radius: 50%;
-          background: rgba(220, 38, 38, 0.35);
+          background: rgba(250, 82, 82, 0.35);
           animation: sos-ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite 0.3s;
         "></div>
         <div style="
           position: relative; z-index: 2;
           width: 26px; height: 26px;
           border-radius: 50%;
-          background: #dc2626;
-          border: 2px solid #fca5a5;
+          background: #e03131;
+          border: 1.5px solid #0d0e10;
           display: flex; align-items: center; justify-content: center;
-          color: white;
+          color: #fff;
           font-size: 10px;
-          font-weight: 800;
-          font-family: system-ui, sans-serif;
+          font-weight: 700;
+          font-family: ui-monospace, monospace;
           line-height: 1;
         ">${peopleCount > 9 ? "9+" : peopleCount}</div>
       </div>
@@ -99,38 +148,144 @@ function createSosIcon(peopleCount: number): L.DivIcon {
   });
 }
 
+function buildDamIcon(alertColor: string, capacityPct: number): L.DivIcon {
+  const c = damColor(alertColor);
+  return L.divIcon({
+    className: "dam-marker",
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
+    popupAnchor: [0, -14],
+    html: `
+      <div style="
+        position: relative;
+        width: 24px; height: 24px;
+        border-radius: 4px;
+        background: #141517;
+        border: 2px solid ${c};
+        overflow: hidden;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+      ">
+        <div style="
+          position: absolute; bottom: 0; left: 0; right: 0;
+          height: ${Math.min(100, Math.max(10, capacityPct))}%;
+          background: ${c}; opacity: 0.4;
+        "></div>
+      </div>
+    `,
+  });
+}
+
+function buildRiverIcon(status: string, trend: string): L.DivIcon {
+  const color = riverColor(status);
+  const arrow = trend === "rising" ? "▲" : trend === "falling" ? "▼" : "•";
+  return L.divIcon({
+    className: "river-marker",
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
+    popupAnchor: [0, -14],
+    html: `
+      <div style="
+        width: 24px; height: 24px;
+        border-radius: 50%;
+        background: #141517;
+        border: 2px solid ${color};
+        display: flex; align-items: center; justify-content: center;
+        color: ${color};
+        font-size: 9px; font-weight: 700;
+        font-family: ui-monospace, monospace;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+      ">${arrow}</div>
+    `,
+  });
+}
+
+const createFloodIcon = memoizeIcon((level: string) => level, buildFloodIcon);
+
+const createSosIcon = memoizeIcon(
+  (count: number) => String(Math.min(count, 10)), // 10+ all render as "9+"
+  buildSosIcon
+);
+
+const createDamIcon = memoizeIcon(
+  (color: string, pct: number) => `${color}:${Math.round(pct)}`,
+  buildDamIcon
+);
+
+const createRiverIcon = memoizeIcon(
+  (status: string, trend: string) => `${status}:${trend}`,
+  buildRiverIcon
+);
+
 /* ════════════════════════════════════════════════════════════════════════════
    Recenter helper
    ════════════════════════════════════════════════════════════════════════════ */
 
 function RecenterButton() {
   const map = useMap();
+  const ref = React.useRef<HTMLButtonElement>(null);
+
+  // The button lives inside the Leaflet container, so without this a click also
+  // reaches the map and starts a drag / double-click zoom underneath it.
+  React.useEffect(() => {
+    if (ref.current) L.DomEvent.disableClickPropagation(ref.current);
+  }, []);
+
   return (
     <button
+      ref={ref}
       onClick={() => map.flyTo(KERALA_CENTER, DEFAULT_ZOOM)}
-      className="absolute bottom-4 right-4 z-[1000] flex h-9 w-9 items-center justify-center rounded-lg border border-surface-600 bg-surface-900/90 text-surface-300 shadow-lg backdrop-blur-sm transition hover:bg-surface-800 hover:text-white"
+      aria-label="Re-center map on Kerala"
+      className="absolute bottom-6 right-3 z-[1000] flex h-8 w-8 items-center justify-center rounded border border-surface-700 bg-surface-950/90 text-surface-400 transition hover:text-surface-100"
       title="Re-center on Kerala"
     >
-      <MapPin className="h-4 w-4" />
+      <Crosshair className="h-4 w-4" />
     </button>
   );
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
-   Utility
+   Popup building blocks — text-only, mono numerals
    ════════════════════════════════════════════════════════════════════════════ */
 
-function formatRelativeTime(dateStr: string): string {
-  const ms = Date.now() - new Date(dateStr).getTime();
-  const sec = Math.floor(ms / 1000);
-  if (sec < 60) return "just now";
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const d = Math.floor(hr / 24);
-  return `${d}d ago`;
+function PopupAction({
+  href,
+  label,
+  danger = false,
+}: {
+  href: string;
+  label: string;
+  danger?: boolean;
+}) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={`flex items-center justify-center rounded-sm border px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider transition ${
+        danger
+          ? "border-emergency-600/60 text-emergency-400 hover:bg-emergency-950/60"
+          : "border-surface-600 text-surface-200 hover:bg-surface-800"
+      }`}
+    >
+      {label}
+    </a>
+  );
 }
+
+function StatusTag({ color, children }: { color: string; children: React.ReactNode }) {
+  return (
+    <span
+      style={{ color, borderColor: color }}
+      className="rounded-sm border px-1.5 py-0.5 font-mono text-[8px] font-bold uppercase tracking-wider"
+    >
+      {children}
+    </span>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   MapContent — war-room Leaflet map
+   ════════════════════════════════════════════════════════════════════════════ */
 
 const LEVEL_LABELS: Record<string, string> = {
   ankle: "Ankle",
@@ -139,195 +294,319 @@ const LEVEL_LABELS: Record<string, string> = {
   roof: "Roof",
 };
 
-/* ════════════════════════════════════════════════════════════════════════════
-   MapContent — the actual Leaflet map (client-only)
-   ════════════════════════════════════════════════════════════════════════════ */
-
 interface MapContentProps {
   reports: FloodReport[];
   sosRequests: SosRequest[];
+  dams?: DamStation[];
+  rivers?: RiverStation[];
 }
 
-export default function MapContent({ reports, sosRequests }: MapContentProps) {
+export default function MapContent({ reports, sosRequests, dams = [], rivers = [] }: MapContentProps) {
+  /* ── Layer Toggles ────────────────────────────────────────────────────── */
+  const [showSos, setShowSos] = useState(true);
+  const [showReports, setShowReports] = useState(true);
+  const [showDams, setShowDams] = useState(true);
+  const [showRivers, setShowRivers] = useState(true);
+
+  // Stations whose upstream feed failed carry placeholder zeroes; plotting them
+  // would put a confident "0% / normal" marker on the map for a level nobody
+  // actually knows. Official-only dams without verified coordinates are
+  // list-only — a wrong pin on a rescue map is worse than no pin.
+  const plottableDams = React.useMemo(
+    () =>
+      dams.filter(
+        (d): d is DamStation & { lat: number; lng: number } =>
+          d.available !== false && d.lat !== null && d.lng !== null
+      ),
+    [dams]
+  );
+  const plottableRivers = React.useMemo(() => rivers.filter((r) => r.available !== false), [rivers]);
+
+  const layerChip = (active: boolean) =>
+    `flex-shrink-0 whitespace-nowrap px-2 py-1 rounded-sm border font-mono text-[10px] font-bold uppercase tracking-wider transition ${
+      active
+        ? "border-surface-500 bg-surface-800 text-surface-100"
+        : "border-surface-800 bg-transparent text-surface-600 hover:text-surface-400"
+    }`;
+
   return (
-    <div className="relative h-full w-full overflow-hidden rounded-xl border border-surface-700/40">
-      {/* Global SOS pulse animation injected once */}
-      <style jsx global>{`
-        @keyframes sos-ping {
-          0%   { transform: scale(1);   opacity: 0.7; }
-          75%  { transform: scale(1.8); opacity: 0; }
-          100% { transform: scale(1.8); opacity: 0; }
-        }
-        /* Remove Leaflet's default marker icon background artifacts */
-        .flood-marker, .sos-marker {
-          background: transparent !important;
-          border: none !important;
-        }
-        /* Style popups to match our dark theme */
-        .leaflet-popup-content-wrapper {
-          background: #1a1d21 !important;
-          color: #e9ecef !important;
-          border-radius: 12px !important;
-          border: 1px solid rgba(52, 58, 64, 0.5) !important;
-          box-shadow: 0 10px 30px rgba(0,0,0,0.5) !important;
-        }
-        .leaflet-popup-tip {
-          background: #1a1d21 !important;
-          border: 1px solid rgba(52, 58, 64, 0.5) !important;
-          box-shadow: none !important;
-        }
-        .leaflet-popup-close-button {
-          color: #868e96 !important;
-          font-size: 18px !important;
-        }
-        .leaflet-popup-close-button:hover {
-          color: #e9ecef !important;
-        }
-      `}</style>
+    <div className="relative h-full w-full overflow-hidden rounded-lg border border-surface-800">
+      {/* ── Layer control: text-only chips ──────────────────────────────────
+          Offset left of Leaflet's zoom control (top-left) and right of the
+          maximize button (top-right) — at 375px it previously sat underneath
+          the zoom buttons and got clipped. Scrolls horizontally rather than
+          wrapping, so it stays one row on any width. */}
+      <div className="no-scrollbar absolute top-3 left-14 right-14 z-[1000] flex items-center gap-1 overflow-x-auto rounded border border-surface-800 bg-surface-950/95 p-1 sm:right-auto">
+        <span className="hidden flex-shrink-0 px-1.5 font-mono text-[9px] font-bold uppercase tracking-widest text-surface-500 sm:inline">
+          Layers
+        </span>
+        <button onClick={() => setShowSos((prev) => !prev)} className={layerChip(showSos)}>
+          SOS{" "}
+          <span className={sosRequests.length > 0 && showSos ? "text-emergency-400" : ""}>
+            {sosRequests.length}
+          </span>
+        </button>
+        <button onClick={() => setShowReports((prev) => !prev)} className={layerChip(showReports)}>
+          RPT {reports.length}
+        </button>
+        <button onClick={() => setShowDams((prev) => !prev)} className={layerChip(showDams)}>
+          DAM {plottableDams.length}
+        </button>
+        <button onClick={() => setShowRivers((prev) => !prev)} className={layerChip(showRivers)}>
+          RIV {plottableRivers.length}
+        </button>
+      </div>
 
       <MapContainer
         center={KERALA_CENTER}
         zoom={DEFAULT_ZOOM}
+        minZoom={TILE_MIN_ZOOM}
+        maxZoom={TILE_MAX_ZOOM}
+        maxBounds={KERALA_BOUNDS}
+        maxBoundsViscosity={1.0}
         scrollWheelZoom={true}
         className="h-full w-full"
-        style={{ background: "#141517" }}
+        style={{ background: "#dee2e6" }}
       >
-        {/* Dark map tiles */}
+        {/* OSM tiles in their standard colors — the monochrome mandate covers
+            the UI chrome, not the basemap. updateWhenIdle waits for pan-end
+            before requesting tiles — fewer wasted requests (OSMF tile policy)
+            and lighter on congested 4G. */}
         <TileLayer
-          attribution='&copy; <a href="https://carto.com/">CARTO</a>'
-          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+          attribution={TILE_ATTRIBUTION}
+          url={TILE_URL}
+          updateWhenIdle={true}
         />
 
         <RecenterButton />
 
         {/* ── Flood report markers ────────────────────────────────────────── */}
-        {reports.map((report) => (
-          <Marker
-            key={`flood-${report.id}`}
-            position={[report.latitude, report.longitude]}
-            icon={createFloodIcon(report.water_level)}
-          >
-            <Popup maxWidth={280} minWidth={200}>
-              <div className="space-y-2 p-1">
-                {/* Header */}
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5">
-                    <Waves className="h-4 w-4" style={{ color: "#60a5fa" }} />
-                    <span className="text-sm font-bold">
+        {showReports &&
+          reports.map((report) => (
+            <Marker
+              key={`flood-${report.id}`}
+              position={[report.latitude, report.longitude]}
+              icon={createFloodIcon(report.water_level)}
+            >
+              <Popup maxWidth={280} minWidth={220}>
+                <div className="space-y-2 p-1">
+                  {/* Header */}
+                  <div className="flex items-center justify-between gap-2 border-b border-surface-800 pb-1.5">
+                    <span className="text-sm font-bold text-surface-100">
                       {LEVEL_LABELS[report.water_level] ?? "Unknown"} Level
                     </span>
+                    <StatusTag
+                      color={report.verified ? SIGNAL.elevated : SIGNAL.normal}
+                    >
+                      {report.verified ? "Verified" : "Unverified"}
+                    </StatusTag>
                   </div>
-                  {report.verified ? (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-900/40 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-400">
-                      <ShieldCheck className="h-3 w-3" /> Verified
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-gray-800/60 px-1.5 py-0.5 text-[9px] font-semibold text-gray-400">
-                      <Eye className="h-3 w-3" /> Unverified
-                    </span>
+
+                  {/* Description */}
+                  {report.description && (
+                    <p className="text-xs leading-relaxed text-surface-300">
+                      {report.description}
+                    </p>
                   )}
+
+                  {/* Image */}
+                  {report.image_url && (
+                    <img
+                      src={report.image_url}
+                      alt="Flood photo"
+                      className="w-full rounded border border-surface-700 object-cover"
+                      style={{ maxHeight: 140 }}
+                    />
+                  )}
+
+                  {/* Meta + actions */}
+                  <div className="flex items-center justify-between gap-2 border-t border-surface-800 pt-1.5">
+                    <span className="font-mono text-[10px] text-surface-500">
+                      {formatRelativeTime(report.created_at)}
+                    </span>
+                    <PopupAction
+                      href={`https://www.google.com/maps/dir/?api=1&destination=${report.latitude},${report.longitude}`}
+                      label="Directions"
+                    />
+                  </div>
                 </div>
-
-                {/* Description */}
-                {report.description && (
-                  <p className="text-xs leading-relaxed text-gray-300">
-                    {report.description}
-                  </p>
-                )}
-
-                {/* Image */}
-                {report.image_url && (
-                  <img
-                    src={report.image_url}
-                    alt="Flood photo"
-                    className="w-full rounded-lg border border-gray-700 object-cover"
-                    style={{ maxHeight: 140 }}
-                  />
-                )}
-
-                {/* Meta */}
-                <div className="flex items-center gap-3 text-[10px] text-gray-500">
-                  <span className="inline-flex items-center gap-1">
-                    <Clock className="h-3 w-3" />
-                    {formatRelativeTime(report.created_at)}
-                  </span>
-                  <span className="inline-flex items-center gap-1">
-                    <MapPin className="h-3 w-3" />
-                    {report.latitude.toFixed(4)}, {report.longitude.toFixed(4)}
-                  </span>
-                </div>
-              </div>
-            </Popup>
-          </Marker>
-        ))}
+              </Popup>
+            </Marker>
+          ))}
 
         {/* ── SOS request markers ─────────────────────────────────────────── */}
-        {sosRequests.map((sos) => (
-          <Marker
-            key={`sos-${sos.id}`}
-            position={[sos.latitude, sos.longitude]}
-            icon={createSosIcon(sos.people_count)}
-          >
-            <Popup maxWidth={280} minWidth={200}>
-              <div className="space-y-2 p-1">
-                {/* Header */}
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-bold text-red-400">
-                    🆘 SOS — {sos.name}
-                  </span>
-                  <span
-                    className={`rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase ${
-                      sos.status === "pending"
-                        ? "bg-red-900/40 text-red-400"
-                        : "bg-emerald-900/40 text-emerald-400"
-                    }`}
-                  >
-                    {sos.status}
-                  </span>
-                </div>
+        {showSos &&
+          sosRequests.map((sos) => {
+            const googleNavUrl = `https://www.google.com/maps/dir/?api=1&destination=${sos.latitude},${sos.longitude}`;
+            const whatsappText = encodeURIComponent(
+              `*KERALA FLOOD EMERGENCY DISPATCH*\nName: ${sos.name}\nPhone: ${sos.phone}\nPeople Trapped: ${sos.people_count}\nNeeds: ${sos.needs.join(", ") || "Immediate Rescue"}\nGPS: https://maps.google.com/?q=${sos.latitude},${sos.longitude}`
+            );
+            const whatsappUrl = `https://wa.me/?text=${whatsappText}`;
+            const isPending = sos.status === "pending";
 
-                {/* Details grid */}
-                <div className="grid grid-cols-2 gap-1.5 text-xs text-gray-300">
-                  <span className="inline-flex items-center gap-1">
-                    <Users className="h-3 w-3 text-gray-500" />
-                    {sos.people_count}{" "}
-                    {sos.people_count === 1 ? "person" : "people"}
-                  </span>
-                  <span className="inline-flex items-center gap-1">
-                    <Phone className="h-3 w-3 text-gray-500" />
-                    {sos.phone}
-                  </span>
-                </div>
-
-                {/* Needs */}
-                {sos.needs.length > 0 && (
-                  <div className="flex flex-wrap gap-1">
-                    {sos.needs.map((need) => (
-                      <span
-                        key={need}
-                        className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300"
-                      >
-                        {need}
+            return (
+              <Marker
+                key={`sos-${sos.id}`}
+                position={[sos.latitude, sos.longitude]}
+                icon={createSosIcon(sos.people_count)}
+                /* A trapped person's beacon must never hide under a dam or
+                   gauge marker — force SOS to the top of the stack. */
+                zIndexOffset={1000}
+              >
+                <Popup maxWidth={300} minWidth={240}>
+                  <div className="space-y-2.5 p-1">
+                    {/* Header */}
+                    <div className="flex items-center justify-between gap-2 border-b border-surface-800 pb-1.5">
+                      <span className="text-sm font-bold text-surface-100">
+                        {sos.name}
                       </span>
-                    ))}
-                  </div>
-                )}
+                      <StatusTag color={isPending ? SIGNAL.danger : SIGNAL.normal}>
+                        {sos.status}
+                      </StatusTag>
+                    </div>
 
-                {/* Meta */}
-                <div className="flex items-center gap-3 text-[10px] text-gray-500">
-                  <span className="inline-flex items-center gap-1">
-                    <Clock className="h-3 w-3" />
-                    {formatRelativeTime(sos.created_at)}
-                  </span>
-                  <span className="inline-flex items-center gap-1">
-                    <MapPin className="h-3 w-3" />
-                    {sos.latitude.toFixed(4)}, {sos.longitude.toFixed(4)}
-                  </span>
+                    {/* Details */}
+                    <div className="grid grid-cols-2 gap-1.5 font-mono text-xs text-surface-300">
+                      <span>
+                        {sos.people_count}{" "}
+                        {sos.people_count === 1 ? "person" : "people"}
+                      </span>
+                      <a
+                        href={`tel:${sos.phone}`}
+                        className="font-bold text-surface-100 hover:underline"
+                      >
+                        {sos.phone}
+                      </a>
+                    </div>
+
+                    {/* Needs */}
+                    {sos.needs.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {sos.needs.map((need) => (
+                          <span
+                            key={need}
+                            className="rounded-sm border border-surface-700 bg-surface-900 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-surface-300"
+                          >
+                            {need}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Rescue actions */}
+                    <div className="grid grid-cols-2 gap-1.5 pt-1">
+                      <PopupAction href={googleNavUrl} label="Directions" />
+                      <PopupAction href={whatsappUrl} label="Dispatch WA" danger />
+                    </div>
+
+                    {/* Meta */}
+                    <div className="flex items-center justify-between border-t border-surface-800 pt-1.5 font-mono text-[9px] text-surface-500">
+                      <span>{formatRelativeTime(sos.created_at)}</span>
+                      <span>
+                        {sos.latitude.toFixed(4)}, {sos.longitude.toFixed(4)}
+                      </span>
+                    </div>
+                  </div>
+                </Popup>
+              </Marker>
+            );
+          })}
+
+        {/* ── Dam Reservoir Markers ───────────────────────────────────────── */}
+        {showDams &&
+          plottableDams.map((dam) => (
+            <Marker
+              key={`dam-${dam.id}`}
+              position={[dam.lat, dam.lng]}
+              icon={createDamIcon(dam.alertColor, dam.capacityPct)}
+            >
+              <Popup maxWidth={260} minWidth={200}>
+                <div className="space-y-2 p-1">
+                  <div className="flex items-center justify-between gap-1 border-b border-surface-800 pb-1.5">
+                    <div>
+                      <span className="block text-xs font-bold text-surface-100">{dam.name}</span>
+                      <span className="block text-[9px] text-surface-500">{dam.river}</span>
+                    </div>
+                    <StatusTag color={damColor(dam.alertColor)}>{dam.status}</StatusTag>
+                  </div>
+
+                  <div className="space-y-1 text-[11px] text-surface-300">
+                    <div className="flex justify-between">
+                      <span>Shutters</span>
+                      <span className="font-semibold text-surface-100">{dam.shutterStatus}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Capacity</span>
+                      <span className="font-mono font-bold text-surface-100">{dam.capacityPct.toFixed(1)}%</span>
+                    </div>
+                    <div className="flex justify-between font-mono text-[10px] text-surface-500">
+                      <span>{dam.currentLevel.toFixed(1)} / {dam.frl} {dam.unit}</span>
+                      {dam.source === "estimated" && (
+                        <span>24h rain {dam.catchmentRain24h.toFixed(1)}mm</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {dam.remarks && (
+                    <p className="text-[10px] leading-snug text-surface-400">{dam.remarks}</p>
+                  )}
+
+                  <p className="border-t border-surface-800 pt-1 text-[9px] uppercase tracking-wider text-surface-600">
+                    {dam.source === "KSDMA"
+                      ? `Official KSDMA bulletin${dam.officialDate ? ` · ${dam.officialDate}` : ""}`
+                      : "Estimated from catchment rainfall"}
+                  </p>
                 </div>
-              </div>
-            </Popup>
-          </Marker>
-        ))}
+              </Popup>
+            </Marker>
+          ))}
+
+        {/* ── River Gauge Markers ────────────────────────────────────────── */}
+        {showRivers &&
+          plottableRivers.map((st) => (
+            <Marker
+              key={`river-${st.id}`}
+              position={[st.lat, st.lng]}
+              icon={createRiverIcon(st.status, st.trend)}
+            >
+              <Popup maxWidth={240} minWidth={180}>
+                <div className="space-y-1.5 p-1">
+                  <div className="flex items-center justify-between border-b border-surface-800 pb-1.5">
+                    <div>
+                      <span className="block text-xs font-bold text-surface-100">{st.name}</span>
+                      <span className="block text-[9px] text-surface-500">{st.river}</span>
+                    </div>
+                    <StatusTag color={riverColor(st.status)}>{st.status}</StatusTag>
+                  </div>
+
+                  <div className="space-y-1 text-[11px] text-surface-300">
+                    <div className="flex items-center justify-between">
+                      <span>Discharge</span>
+                      <span className="font-mono font-bold text-surface-100">{st.discharge.toFixed(1)} m³/s</span>
+                    </div>
+                    <div className="flex items-center justify-between font-mono text-[10px] text-surface-500">
+                      <span>Danger {st.dangerLevel} m³/s</span>
+                      <span className="uppercase">{st.trend}</span>
+                    </div>
+                  </div>
+
+                  {st.officialAlert && (
+                    <div className="border-t border-surface-800 pt-1.5">
+                      <span
+                        className="text-[9px] font-bold uppercase tracking-wider"
+                        style={{ color: st.officialAlert.severity === "yellow" ? SIGNAL.warning : SIGNAL.danger }}
+                      >
+                        Official alert · {st.officialAlert.source}
+                      </span>
+                      <p className="mt-0.5 text-[10px] leading-snug text-surface-300">
+                        {st.officialAlert.message}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </Popup>
+            </Marker>
+          ))}
       </MapContainer>
     </div>
   );

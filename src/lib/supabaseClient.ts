@@ -13,6 +13,12 @@ if (
   );
 }
 
+export const isSupabaseConfigured = Boolean(
+  process.env.NEXT_PUBLIC_SUPABASE_URL &&
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY &&
+  !process.env.NEXT_PUBLIC_SUPABASE_URL.includes("placeholder-url")
+);
+
 /**
  * Singleton Supabase client for browser-side usage.
  * Typed against the `Database` schema for full autocomplete.
