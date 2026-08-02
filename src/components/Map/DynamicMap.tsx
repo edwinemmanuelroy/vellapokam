@@ -3,6 +3,7 @@
 import React from "react";
 import dynamic from "next/dynamic";
 import type { FloodReport, SosRequest } from "@/types/database";
+import type { DamStation, RiverStation } from "@/types/hydromet";
 import { Loader2 } from "lucide-react";
 
 /* ── Dynamic import disables SSR for Leaflet (it requires `window`) ──────── */
@@ -25,10 +26,12 @@ const MapContent = dynamic(() => import("./MapContent"), {
 interface DynamicMapProps {
   reports: FloodReport[];
   sosRequests: SosRequest[];
+  dams?: DamStation[];
+  rivers?: RiverStation[];
 }
 
-export default function DynamicMap({ reports, sosRequests }: DynamicMapProps) {
+export default function DynamicMap({ reports, sosRequests, dams = [], rivers = [] }: DynamicMapProps) {
   return (
-    <MapContent reports={reports} sosRequests={sosRequests} />
+    <MapContent reports={reports} sosRequests={sosRequests} dams={dams} rivers={rivers} />
   );
 }
