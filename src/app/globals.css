@@ -2,24 +2,71 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Theme variables ──────────────────────────────────────────────────────── */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0d0e10;
+  --foreground: #e9ecef;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+/* ─── Base resets ──────────────────────────────────────────────────────────── */
 body {
   color: var(--foreground);
   background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
 }
 
+/* ─── Scrollbar (webkit) ───────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #141517;
+}
+::-webkit-scrollbar-thumb {
+  background: #343a40;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #495057;
+}
+
+/* ─── Component layer ──────────────────────────────────────────────────────── */
+@layer components {
+  /* Glassmorphic card */
+  .card-glass {
+    @apply rounded-xl border border-surface-700/40 bg-surface-900/60 backdrop-blur-md shadow-lg;
+  }
+
+  /* Emergency badge pulsing glow */
+  .badge-sos {
+    @apply inline-flex items-center gap-1.5 rounded-full bg-emergency-600/20 px-3 py-1 text-xs font-semibold uppercase tracking-wider text-emergency-400 ring-1 ring-emergency-500/30 animate-pulse-emergency;
+  }
+
+  /* Stat card used in the header row */
+  .stat-card {
+    @apply card-glass flex flex-col gap-1 p-4 transition-transform duration-200 hover:scale-[1.03];
+  }
+
+  /* Water level indicator bar */
+  .water-level-bar {
+    @apply h-2 rounded-full;
+  }
+  .water-level-bar[data-level="ankle"] {
+    @apply bg-blue-400 w-1/4;
+  }
+  .water-level-bar[data-level="knee"] {
+    @apply bg-blue-500 w-2/4;
+  }
+  .water-level-bar[data-level="waist"] {
+    @apply bg-warning-500 w-3/4;
+  }
+  .water-level-bar[data-level="roof"] {
+    @apply bg-emergency-500 w-full;
+  }
+}
+
+/* ─── Utility layer ────────────────────────────────────────────────────────── */
 @layer utilities {
   .text-balance {
     text-wrap: balance;
