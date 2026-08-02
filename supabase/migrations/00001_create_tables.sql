@@ -16,8 +16,22 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- Custom ENUM types
 -- ---------------------------------------------------------------------------
 
-CREATE TYPE water_level AS ENUM ('ankle', 'knee', 'waist', 'roof');
-CREATE TYPE sos_status  AS ENUM ('pending', 'rescued');
+-- Guarded so the migration can be re-run without erroring on existing types
+DO $$
+BEGIN
+  CREATE TYPE water_level AS ENUM ('ankle', 'knee', 'waist', 'roof');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END
+$$;
+
+DO $$
+BEGIN
+  CREATE TYPE sos_status AS ENUM ('pending', 'rescued');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END
+$$;
 
 -- ---------------------------------------------------------------------------
 -- flood_reports — crowd-sourced flood sightings
@@ -85,30 +99,41 @@ ALTER TABLE flood_reports ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sos_requests  ENABLE ROW LEVEL SECURITY;
 
 -- flood_reports policies
+DROP POLICY IF EXISTS "Anyone can read flood reports" ON flood_reports;
 CREATE POLICY "Anyone can read flood reports"
   ON flood_reports FOR SELECT
   USING (true);
 
+DROP POLICY IF EXISTS "Anyone can create flood reports" ON flood_reports;
 CREATE POLICY "Anyone can create flood reports"
   ON flood_reports FOR INSERT
   WITH CHECK (true);
 
+DROP POLICY IF EXISTS "Only authenticated users can update flood reports" ON flood_reports;
 CREATE POLICY "Only authenticated users can update flood reports"
   ON flood_reports FOR UPDATE
-  USING (auth.role() = 'authenticated');
+  USING (auth.role() = 'authenticated')
+  WITH CHECK (auth.role() = 'authenticated');
 
 -- sos_requests policies
+DROP POLICY IF EXISTS "Anyone can read SOS requests" ON sos_requests;
 CREATE POLICY "Anyone can read SOS requests"
   ON sos_requests FOR SELECT
   USING (true);
 
+DROP POLICY IF EXISTS "Anyone can create SOS requests" ON sos_requests;
 CREATE POLICY "Anyone can create SOS requests"
   ON sos_requests FOR INSERT
   WITH CHECK (true);
 
+-- Superseded by migration 00005, which narrows public updates to the status
+-- column only. Kept here so a fresh database is never left wide open between
+-- migrations.
+DROP POLICY IF EXISTS "Only authenticated users can update SOS requests" ON sos_requests;
 CREATE POLICY "Only authenticated users can update SOS requests"
   ON sos_requests FOR UPDATE
-  USING (auth.role() = 'authenticated');
+  USING (auth.role() = 'authenticated')
+  WITH CHECK (auth.role() = 'authenticated');
 
 -- ---------------------------------------------------------------------------
 -- Enable Realtime
@@ -128,13 +153,17 @@ INSERT INTO storage.buckets (id, name, public)
 VALUES ('flood-photos', 'flood-photos', true)
 ON CONFLICT (id) DO NOTHING;
 
--- Allows anyone to upload images to the flood-photos bucket
+-- Allows anyone to upload images to the flood-photos bucket.
+-- Migration 00005 adds the mime-type/size ceiling and the reports/ prefix
+-- restriction that this permissive version lacks.
+DROP POLICY IF EXISTS "Anyone can upload flood photos" ON storage.objects;
 CREATE POLICY "Anyone can upload flood photos"
   ON storage.objects FOR INSERT
   TO public
   WITH CHECK (bucket_id = 'flood-photos');
 
 -- Allows anyone to view images in the flood-photos bucket
+DROP POLICY IF EXISTS "Anyone can read flood photos" ON storage.objects;
 CREATE POLICY "Anyone can read flood photos"
   ON storage.objects FOR SELECT
   TO public

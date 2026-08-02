@@ -2,7 +2,14 @@
 -- Kerala Flood Emergency Dashboard — advisories table
 -- =============================================================================
 
-CREATE TYPE advisory_type AS ENUM ('critical', 'warning', 'info');
+-- Guarded so the migration can be re-run without erroring on an existing type
+DO $$
+BEGIN
+  CREATE TYPE advisory_type AS ENUM ('critical', 'warning', 'info');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS advisories (
   id         UUID          PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -26,12 +33,14 @@ CREATE POLICY "Anyone can read advisories"
 
 CREATE POLICY "Only authenticated users can insert advisories"
   ON advisories FOR INSERT
-  USING (auth.role() = 'authenticated');
+  WITH CHECK (auth.role() = 'authenticated');
 
--- Populate seed data for advisories
-INSERT INTO advisories (title, message, type)
-VALUES
-  ('KSDMA RED ALERT', 'Red Alert issued for Wayanad & Idukki. Heavy to extremely heavy rainfall expected over the next 24 hours.', 'critical'),
-  ('Cheruthoni Dam Status', 'Idukki Cheruthoni Dam shutters raised by 50cm. Residents near Periyar banks advised to shift to relief camps.', 'critical'),
-  ('Helpline Advisory', 'District helpline 1077 and State control room are active 24/7. Dial 112 for police dispatch.', 'info'),
-  ('Coastal Surge Warning', 'High tidal waves alert for Alappuzha & Kollam coastlines. Fishermen advised not to venture into sea.', 'warning');
+-- ---------------------------------------------------------------------------
+-- No seed data.
+-- ---------------------------------------------------------------------------
+-- This table previously seeded invented bulletins ("Red Alert issued for
+-- Wayanad & Idukki", "Cheruthoni Dam shutters raised by 50cm") attributed to
+-- KSDMA and the Irrigation Department. They render in the ticker exactly like
+-- genuine advisories, so demo data here is indistinguishable from a real
+-- warning. Populate this table only with advisories actually issued by the
+-- relevant authority. Migration 00005 removes the previously seeded rows.
