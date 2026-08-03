@@ -89,7 +89,14 @@ Alerts opted-in devices within 25 km when an SOS is filed nearby, plus red/orang
 1. **VAPID keys** — `npx web-push generate-vapid-keys` → `NEXT_PUBLIC_VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, plus a `VAPID_SUBJECT` mailto.
 2. **Service-role key** — Supabase → Settings → API → `service_role` into `SUPABASE_SERVICE_ROLE_KEY`. **Server-only**: it bypasses RLS, so never give it a `NEXT_PUBLIC_` prefix. `src/lib/push.ts` imports `server-only` so a stray client import fails the build rather than leaking it.
 3. **Database webhook** — Supabase → Database → Webhooks → table `sos_requests`, event `INSERT`, `POST https://<host>/api/push/dispatch`, header `x-webhook-secret: <PUSH_WEBHOOK_SECRET>`. Server-triggered on purpose: the alert still goes out if the reporter's phone dies right after submitting.
-4. **Alert sweep cron** — `vercel.json` schedules `/api/push/alerts-sweep` every 10 minutes. Any external scheduler works; authenticate with the same `x-webhook-secret`.
+4. **Alert sweep cron** — pushes new red/orange official warnings. Two schedulers ship, because **Vercel's Hobby plan allows cron jobs at most once per day** (a sub-daily `schedule` in `vercel.json` fails the deployment outright):
+
+   | Scheduler | Cadence | Setup |
+   | --- | --- | --- |
+   | `vercel.json` | daily, 02:00 UTC | none — works on Hobby out of the box |
+   | `.github/workflows/alerts-sweep.yml` | every 10 min | add `APP_URL` and `PUSH_WEBHOOK_SECRET` repo secrets |
+
+   A once-daily sweep is close to useless for severe-weather warnings, so GitHub Actions is the real cadence and the Vercel cron is a zero-setup fallback. Running both is safe — the endpoint dedupes against the `pushed_alerts` ledger, so an alert is never sent twice. On Vercel Pro, change `vercel.json` to `*/10 * * * *` and delete the workflow. Any other scheduler works too; authenticate with the same `x-webhook-secret` header.
 
 **iOS caveat**: Apple only exposes the Push API to sites added to the Home Screen. On iPhone the consent card replaces the enable button with Add-to-Home-Screen instructions — this is a platform limit, not a bug.
 
