@@ -18,7 +18,7 @@ import {
   TILE_MAX_ZOOM,
   KERALA_BOUNDS,
 } from "@/lib/mapConfig";
-import { formatRelativeTime } from "@/lib/format";
+import { buildDirectionsUrl, buildDispatchMessage, formatRelativeTime } from "@/lib/format";
 import { Crosshair } from "lucide-react";
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -261,7 +261,7 @@ function PopupAction({
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className={`flex items-center justify-center rounded-sm border px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider transition ${
+      className={`flex items-center justify-center rounded-sm border px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider transition ${
         danger
           ? "border-emergency-600/60 text-emergency-400 hover:bg-emergency-950/60"
           : "border-surface-600 text-surface-200 hover:bg-surface-800"
@@ -425,7 +425,7 @@ export default function MapContent({ reports, sosRequests, dams = [], rivers = [
                       {formatRelativeTime(report.created_at)}
                     </span>
                     <PopupAction
-                      href={`https://www.google.com/maps/dir/?api=1&destination=${report.latitude},${report.longitude}`}
+                      href={buildDirectionsUrl(report.latitude, report.longitude)}
                       label="Directions"
                     />
                   </div>
@@ -437,10 +437,8 @@ export default function MapContent({ reports, sosRequests, dams = [], rivers = [
         {/* ── SOS request markers ─────────────────────────────────────────── */}
         {showSos &&
           sosRequests.map((sos) => {
-            const googleNavUrl = `https://www.google.com/maps/dir/?api=1&destination=${sos.latitude},${sos.longitude}`;
-            const whatsappText = encodeURIComponent(
-              `*KERALA FLOOD EMERGENCY DISPATCH*\nName: ${sos.name}\nPhone: ${sos.phone}\nPeople Trapped: ${sos.people_count}\nNeeds: ${sos.needs.join(", ") || "Immediate Rescue"}\nGPS: https://maps.google.com/?q=${sos.latitude},${sos.longitude}`
-            );
+            const googleNavUrl = buildDirectionsUrl(sos.latitude, sos.longitude);
+            const whatsappText = encodeURIComponent(buildDispatchMessage(sos));
             const whatsappUrl = `https://wa.me/?text=${whatsappText}`;
             const isPending = sos.status === "pending";
 
@@ -473,7 +471,7 @@ export default function MapContent({ reports, sosRequests, dams = [], rivers = [
                       </span>
                       <a
                         href={`tel:${sos.phone}`}
-                        className="font-bold text-surface-100 hover:underline"
+                        className="inline-block rounded-sm py-2 font-bold text-surface-100 hover:underline"
                       >
                         {sos.phone}
                       </a>

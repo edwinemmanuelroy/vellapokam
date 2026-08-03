@@ -15,7 +15,7 @@ import Link from "next/link";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import type { Advisory, AdvisoryType, FloodReport, SosRequest } from "@/types/database";
-import { formatRelativeTime } from "@/lib/format";
+import { buildDirectionsUrl, formatRelativeTime } from "@/lib/format";
 import { Loader2 } from "lucide-react";
 
 /* ── Shared micro-styles (mirrors the dashboard's mono language) ─────────── */
@@ -24,7 +24,7 @@ const inputClass =
   "w-full rounded-sm border border-surface-700 bg-surface-850 px-3 py-2 text-sm text-surface-200 placeholder-surface-600 outline-none transition focus:border-surface-400";
 
 const buttonClass =
-  "rounded-sm border border-surface-600 px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider text-surface-200 transition hover:bg-surface-800 disabled:opacity-50";
+  "rounded-sm border border-surface-600 px-3 py-2.5 text-[11px] font-bold uppercase tracking-wider text-surface-200 transition hover:bg-surface-800 disabled:opacity-50";
 
 const ADVISORY_TYPES: { value: AdvisoryType; label: string; classes: string }[] = [
   { value: "critical", label: "Critical", classes: "text-emergency-400 border-emergency-600/50" },
@@ -329,9 +329,9 @@ export default function AdminPage() {
           <span className="font-mono text-[10px] text-surface-500">{session.user.email}</span>
           <Link
             href="/"
-            className="font-mono text-[9px] font-bold uppercase tracking-widest text-surface-600 hover:text-surface-300"
+            className="rounded-sm px-2 py-2.5 font-mono text-[10px] font-bold uppercase tracking-widest text-surface-500 hover:text-surface-200"
           >
-            Dashboard
+            ← Dashboard
           </Link>
           <button onClick={signOut} className={buttonClass}>
             Sign Out
@@ -422,7 +422,7 @@ export default function AdminPage() {
                       </span>
                       <button
                         onClick={() => deleteAdvisory(a.id)}
-                        className="text-[9px] font-bold uppercase tracking-wider text-surface-600 transition hover:text-emergency-400"
+                        className="rounded-sm px-2 py-2 text-[10px] font-bold uppercase tracking-wider text-surface-600 transition hover:text-emergency-400"
                       >
                         Retract
                       </button>
@@ -483,7 +483,7 @@ export default function AdminPage() {
                       </div>
                     )}
                     <div className="grid grid-cols-2 gap-1.5 font-mono text-[11px] text-surface-300">
-                      <a href={`tel:${sos.phone}`} className="hover:underline">{sos.phone}</a>
+                      <a href={`tel:${sos.phone}`} className="inline-block truncate rounded-sm py-2 hover:underline">{sos.phone}</a>
                       <span>{sos.people_count} people</span>
                     </div>
                     {sos.needs.length > 0 && (
@@ -493,7 +493,7 @@ export default function AdminPage() {
                     )}
                     <div className="flex flex-wrap gap-1.5 border-t border-surface-800 pt-2">
                       <a
-                        href={`https://www.google.com/maps/dir/?api=1&destination=${sos.latitude},${sos.longitude}`}
+                        href={buildDirectionsUrl(sos.latitude, sos.longitude)}
                         target="_blank"
                         rel="noopener noreferrer"
                         className={buttonClass}
