@@ -4,6 +4,12 @@ import type { OfficialAlert } from "@/types/hydromet";
 
 export const revalidate = 900; // 15-minute revalidation cache
 
+// Vercel's default function timeout is 10s. This route is network-bound
+// against Indian government / weather endpoints from a US-region function,
+// so it is given the full Hobby-tier headroom rather than risking a
+// timeout during an event. 60s is the Hobby maximum.
+export const maxDuration = 60;
+
 interface Station {
   id: string;
   name: string;

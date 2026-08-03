@@ -1,0 +1,59 @@
+name: Official alert sweep
+
+# Pushes new red/orange government warnings to subscribed devices.
+#
+# Why this exists instead of Vercel Cron: Vercel's Hobby plan allows cron jobs
+# to run at most once per day, and a once-daily sweep is close to useless for
+# severe-weather warnings. GitHub Actions schedules are free and run every ten
+# minutes, so this is the real cadence; `vercel.json` keeps a daily run as a
+# zero-setup fallback. Both firing is harmless — the endpoint dedupes against
+# the pushed_alerts ledger, so an alert is never sent twice.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   APP_URL             https://your-deployment.vercel.app  (no trailing slash)
+#   PUSH_WEBHOOK_SECRET the same value set in the Vercel environment
+#
+# Note: GitHub disables scheduled workflows after 60 days without repository
+# activity, and schedules can be delayed under load. If push reliability
+# becomes critical, move to a dedicated scheduler.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: # lets you trigger a sweep by hand to test
+
+concurrency:
+  group: alerts-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger alert sweep
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          PUSH_WEBHOOK_SECRET: ${{ secrets.PUSH_WEBHOOK_SECRET }}
+        run: |
+          if [ -z "$APP_URL" ] || [ -z "$PUSH_WEBHOOK_SECRET" ]; then
+            echo "APP_URL or PUSH_WEBHOOK_SECRET is not set; skipping."
+            exit 0
+          fi
+
+          response=$(curl -sS --max-time 120 -w '\n%{http_code}' \
+            -X POST "$APP_URL/api/push/alerts-sweep" \
+            -H "x-webhook-secret: $PUSH_WEBHOOK_SECRET")
+
+          status=$(printf '%s' "$response" | tail -n1)
+          body=$(printf '%s' "$response" | sed '$d')
+
+          echo "HTTP $status"
+          echo "$body"
+
+          # 503 means push is not configured on the deployment — not a failure.
+          if [ "$status" = "200" ] || [ "$status" = "503" ]; then
+            exit 0
+          fi
+          echo "::error::Alert sweep failed with HTTP $status"
+          exit 1
