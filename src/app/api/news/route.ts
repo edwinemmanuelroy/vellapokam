@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 export const revalidate = 900; // 15-minute revalidation cache
 
+/** Headlines returned, after sorting newest-first. */
+const MAX_ITEMS = 15;
+
 interface NewsItem {
   title: string;
   source: string;
@@ -55,10 +58,15 @@ export async function GET() {
 
     // Simple XML parser using RegExp to avoid bulky XML parsing dependencies
     const itemRegex = /<item>([\s\S]*?)<\/item>/g;
-    const items: NewsItem[] = [];
+    // `sortKey` is the parsed timestamp, or null when the feed gave us
+    // something unparseable. Kept separate from the displayed `pubDate` so an
+    // undateable item sorts last instead of masquerading as breaking news.
+    const parsed: (NewsItem & { sortKey: number | null })[] = [];
     let match;
 
-    while ((match = itemRegex.exec(xmlText)) !== null && items.length < 15) {
+    // Parse EVERY item, then sort, then cap. The feed is not chronological —
+    // capping first (as this used to) drops the newest stories on the floor.
+    while ((match = itemRegex.exec(xmlText)) !== null) {
       const itemContent = match[1];
 
       const titleMatch = itemContent.match(/<title>([\s\S]*?)<\/title>/);
@@ -74,9 +82,11 @@ export async function GET() {
 
       const rawDate = pubDateMatch ? decodeXml(pubDateMatch[1]) : "";
       const parsedDate = new Date(rawDate);
-      const pubDate = Number.isNaN(parsedDate.getTime())
-        ? new Date().toUTCString()
-        : parsedDate.toUTCString();
+      const hasDate = !Number.isNaN(parsedDate.getTime());
+      // Previously an unparseable date was backfilled with `now`, which under
+      // a date sort would rocket undated junk to the top of the feed.
+      const sortKey = hasDate ? parsedDate.getTime() : null;
+      const pubDate = hasDate ? parsedDate.toUTCString() : "";
 
       // Google News appends " - <Source>" to the headline; drop the duplicate.
       let displayTitle = fullTitle;
@@ -89,13 +99,29 @@ export async function GET() {
         }
       }
 
-      items.push({
+      parsed.push({
         title: displayTitle.trim(),
         source: source.trim(),
         link,
         pubDate,
+        sortKey,
       });
     }
+
+    // Newest first; undated items keep feed order and sink to the bottom.
+    parsed.sort((a, b) => {
+      if (a.sortKey === null && b.sortKey === null) return 0;
+      if (a.sortKey === null) return 1;
+      if (b.sortKey === null) return -1;
+      return b.sortKey - a.sortKey;
+    });
+
+    const items: NewsItem[] = parsed.slice(0, MAX_ITEMS).map((entry) => ({
+      title: entry.title,
+      source: entry.source,
+      link: entry.link,
+      pubDate: entry.pubDate,
+    }));
 
     // An empty feed is reported as an empty feed. Seeding invented headlines
     // here would put fabricated flood bulletins in front of users.

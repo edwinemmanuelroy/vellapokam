@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { roundCoarse } from "@/lib/geo";
 
 /**
  * Map a day's rainfall to an IMD-style colour warning.
@@ -75,8 +76,17 @@ export async function GET(request: Request) {
   // Validate coordinates before forwarding them to the upstream provider.
   const latParam = Number(searchParams.get("latitude"));
   const lngParam = Number(searchParams.get("longitude"));
-  const lat = Number.isFinite(latParam) && Math.abs(latParam) <= 90 ? latParam : 9.9312; // Kochi
-  const lng = Number.isFinite(lngParam) && Math.abs(lngParam) <= 180 ? lngParam : 76.2673;
+  // Rounded to ~1.1km BEFORE building the upstream URL. Raw GPS carries ~7
+  // decimal places, so every device produced a unique cache key and therefore
+  // a cold Open-Meteo call — on the most-requested external dependency here.
+  // Rounding collapses a whole neighbourhood onto one cached entry, and 1km
+  // precision is far finer than a weather forecast resolves anyway.
+  const lat = roundCoarse(
+    Number.isFinite(latParam) && Math.abs(latParam) <= 90 ? latParam : 9.9312 // Kochi
+  );
+  const lng = roundCoarse(
+    Number.isFinite(lngParam) && Math.abs(lngParam) <= 180 ? lngParam : 76.2673
+  );
 
   try {
     // 1. Fetch live Open-Meteo forecast (precipitation, rain, temp, weather_code)

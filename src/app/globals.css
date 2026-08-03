@@ -15,6 +15,17 @@ body {
   font-family: var(--font-geist-sans), system-ui, sans-serif;
 }
 
+/* ─── Focus visibility ─────────────────────────────────────────────────────
+   Several controls set `outline-none` and replaced it only with a 1px border
+   colour shift, which is well below a usable focus indicator. This restores a
+   consistent, high-contrast ring for keyboard users on every interactive
+   element without reintroducing the mouse-click outline. */
+:focus-visible {
+  outline: 2px solid #e9ecef;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
 /* ─── Scrollbar (webkit) ───────────────────────────────────────────────────── */
 ::-webkit-scrollbar {
   width: 6px;

@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useEffect, useState, useCallback } from "react";
-import Link from "next/link";
 import { supabase } from "@/lib/supabaseClient";
 import type { FloodReport, SosRequest } from "@/types/database";
 import type {
@@ -12,7 +11,12 @@ import type {
   RiverResponse,
   WeatherResponse,
 } from "@/types/hydromet";
-import { formatRelativeTime, formatSyncAge } from "@/lib/format";
+import {
+  buildDirectionsUrl,
+  buildDispatchMessage,
+  formatRelativeTime,
+  formatSyncAge,
+} from "@/lib/format";
 // Shared with the server-side push routes — single source of truth for
 // distance maths and the district list.
 import { getDistanceKm, formatDistance } from "@/lib/geo";
@@ -22,7 +26,7 @@ import ReportModal from "@/components/ReportModal/ReportModal";
 import GovtAlertsTicker from "@/components/GovtAlertsTicker/GovtAlertsTicker";
 import NotificationConsent from "@/components/Notifications/NotificationConsent";
 import { useToast } from "@/components/Toast/ToastProvider";
-import { Loader2, Maximize2, Menu, Minimize2, X } from "lucide-react";
+import { Loader2, Maximize2, Menu, Minimize2, RefreshCw, X } from "lucide-react";
 
 /** Radius within which a new SOS is treated as "near you". */
 const NEARBY_RADIUS_KM = 25;
@@ -89,7 +93,7 @@ function riverStatusClasses(status: string): { text: string; bg: string } {
 
 /* ── Small presentational helpers ────────────────────────────────────────── */
 
-function StatCard({
+const StatCard = React.memo(function StatCard({
   label,
   value,
   accent = "text-surface-100",
@@ -106,7 +110,7 @@ function StatCard({
       </span>
     </div>
   );
-}
+});
 
 function PanelHeader({
   title,
@@ -151,7 +155,7 @@ function TrendGlyph({ trend }: { trend: string }) {
   return <span className="font-mono text-[10px] text-surface-600">•</span>;
 }
 
-function FloodReportCard({ report }: { report: FloodReport }) {
+const FloodReportCard = React.memo(function FloodReportCard({ report }: { report: FloodReport }) {
   const meta = LEVEL_META[report.water_level] ?? LEVEL_META.ankle;
   const timeAgo = formatRelativeTime(report.created_at);
 
@@ -198,13 +202,24 @@ function FloodReportCard({ report }: { report: FloodReport }) {
       </div>
     </div>
   );
-}
+});
 
-function SosCard({ sos, onResolve }: { sos: SosRequest; onResolve?: (id: string) => void }) {
+const SosCard = React.memo(function SosCard({
+  sos,
+  onResolve,
+  highlighted = false,
+}: {
+  sos: SosRequest;
+  onResolve?: (id: string) => void;
+  highlighted?: boolean;
+}) {
   const isPending = sos.status === "pending";
   const isReported = Boolean(sos.rescue_reported_at) && isPending;
+  // Ticks every 30s so the waiting time keeps climbing and the 60-minute
+  // escalation actually fires even on a silent realtime channel.
+  const now = useNowTick();
   const timeAgo = formatRelativeTime(sos.created_at);
-  const waitMinutes = Math.floor((Date.now() - new Date(sos.created_at).getTime()) / 60000);
+  const waitMinutes = Math.floor((now - new Date(sos.created_at).getTime()) / 60000);
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -254,7 +269,10 @@ function SosCard({ sos, onResolve }: { sos: SosRequest; onResolve?: (id: string)
 
   return (
     <div
+      data-sos-id={sos.id}
       className={`card-glass animate-slide-up relative overflow-hidden p-4 transition duration-200 hover:border-surface-700 ${
+        highlighted ? "ring-2 ring-emergency-500 ring-offset-2 ring-offset-surface-950 " : ""
+      }${
         isReported
           ? "border-warning-700/60"
           : isPending
@@ -272,7 +290,7 @@ function SosCard({ sos, onResolve }: { sos: SosRequest; onResolve?: (id: string)
 
       <div className="mb-2.5 flex items-start justify-between gap-2">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-bold text-surface-100">{sos.name}</span>
+          <span className="min-w-0 truncate text-xs font-bold text-surface-100">{sos.name}</span>
           {/* Waiting time is the triage signal: red past the first hour. */}
           {isPending && (
             <span
@@ -305,7 +323,10 @@ function SosCard({ sos, onResolve }: { sos: SosRequest; onResolve?: (id: string)
       )}
 
       <div className="mb-2.5 grid grid-cols-2 gap-2 font-mono text-[11px] text-surface-300">
-        <a href={`tel:${sos.phone}`} className="hover:underline">
+        <a
+          href={`tel:${sos.phone}`}
+          className="min-w-0 truncate rounded-sm py-2 hover:underline"
+        >
           {sos.phone}
         </a>
         <span>
@@ -329,25 +350,25 @@ function SosCard({ sos, onResolve }: { sos: SosRequest; onResolve?: (id: string)
       {/* Dispatch actions */}
       <div className="mb-2.5 flex flex-wrap items-center gap-1.5 border-t border-surface-800 pt-2">
         <a
-          href={`https://www.google.com/maps/dir/?api=1&destination=${sos.latitude},${sos.longitude}`}
+          href={buildDirectionsUrl(sos.latitude, sos.longitude)}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex flex-1 items-center justify-center rounded-sm border border-surface-600 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-surface-200 transition hover:bg-surface-800"
+          className="flex flex-1 items-center justify-center rounded-sm border border-surface-600 px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider text-surface-200 transition hover:bg-surface-800"
         >
           Directions
         </a>
         <a
-          href={`https://wa.me/?text=${encodeURIComponent(`KERALA FLOOD DISPATCH: ${sos.name} (${sos.people_count} people) Needs: ${sos.needs.join(", ") || "Immediate Rescue"} GPS: https://maps.google.com/?q=${sos.latitude},${sos.longitude}`)}`}
+          href={`https://wa.me/?text=${encodeURIComponent(buildDispatchMessage(sos))}`}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex flex-1 items-center justify-center rounded-sm border border-surface-600 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-surface-200 transition hover:bg-surface-800"
+          className="flex flex-1 items-center justify-center rounded-sm border border-surface-600 px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider text-surface-200 transition hover:bg-surface-800"
         >
           Dispatch WA
         </a>
         {isPending && !isReported && !confirming && (
           <button
             onClick={() => setConfirming(true)}
-            className="rounded-sm border border-surface-600 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-surface-200 transition hover:bg-surface-800"
+            className="rounded-sm border border-surface-600 px-2.5 py-2.5 text-[10px] font-bold uppercase tracking-wider text-surface-200 transition hover:bg-surface-800"
           >
             Report rescued
           </button>
@@ -360,14 +381,14 @@ function SosCard({ sos, onResolve }: { sos: SosRequest; onResolve?: (id: string)
             <button
               onClick={handleReportRescued}
               disabled={resolving}
-              className="flex items-center gap-1 rounded-sm border border-surface-500 bg-surface-800 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-surface-100 transition hover:bg-surface-700 disabled:opacity-50"
+              className="flex items-center gap-1 rounded-sm border border-surface-500 bg-surface-800 px-2.5 py-2.5 text-[10px] font-bold uppercase tracking-wider text-surface-100 transition hover:bg-surface-700 disabled:opacity-50"
             >
               {resolving && <Loader2 className="h-3 w-3 animate-spin" />}
               Yes, report
             </button>
             <button
               onClick={() => setConfirming(false)}
-              className="rounded-sm px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-surface-500 transition hover:text-surface-300"
+              className="rounded-sm px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider text-surface-500 transition hover:text-surface-300"
             >
               Cancel
             </button>
@@ -389,7 +410,7 @@ function SosCard({ sos, onResolve }: { sos: SosRequest; onResolve?: (id: string)
       )}
     </div>
   );
-}
+});
 
 function SkeletonCard() {
   return (
@@ -407,6 +428,60 @@ function EmptyState({ message }: { message: string }) {
       <p className="text-xs text-surface-500">{message}</p>
     </div>
   );
+}
+
+/**
+ * Failure state for the SOS and report feeds. Deliberately unlike `EmptyState`:
+ * an empty queue and an unreachable queue mean opposite things to a rescuer.
+ */
+function FeedError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="space-y-2 rounded-lg border border-emergency-700/60 bg-emergency-950/40 p-4 text-center"
+    >
+      <p className="text-xs font-bold uppercase tracking-wider text-emergency-300">
+        Rescue queue unavailable
+      </p>
+      <p className="text-[11px] leading-relaxed text-emergency-200/80">
+        This list may be out of date — it is <strong>not</strong> a sign that nobody
+        needs help. {message}
+      </p>
+      <button
+        onClick={onRetry}
+        className="rounded-sm border border-emergency-500/60 px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-emergency-300 transition hover:bg-emergency-900/40"
+      >
+        Retry
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Shared coarse clock, ticking every 30s.
+ *
+ * Relative times were computed at render only, and when realtime is connected
+ * the fallback poll is disabled — so on a quiet channel a card showed
+ * "waiting 3m" for an hour and the 60-minute red escalation never fired.
+ */
+function useNowTick(intervalMs = 30_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+/**
+ * Merge a freshly fetched snapshot with local state, keeping any row the
+ * snapshot has not caught up with yet (a realtime INSERT mid-flight, or an
+ * optimistic rescue flag). Server rows win for records present in both.
+ */
+function mergeById<T extends { id: string }>(incoming: T[], previous: T[]): T[] {
+  const seen = new Set(incoming.map((r) => r.id));
+  const localOnly = previous.filter((r) => !seen.has(r.id));
+  return localOnly.length === 0 ? incoming : [...localOnly, ...incoming];
 }
 
 /** IST wall clock — renders only after mount to avoid a hydration mismatch. */
@@ -451,6 +526,7 @@ export default function DashboardPage() {
   const [reports, setReports] = useState<FloodReport[]>([]);
   const [sosRequests, setSosRequests] = useState<SosRequest[]>([]);
   const [loading, setLoading] = useState(true);
+  const [errorIncidents, setErrorIncidents] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   // Which tab the report modal opens on. SOS is the product's primary action,
@@ -483,6 +559,7 @@ export default function DashboardPage() {
   const [dams, setDams] = useState<DamResponse | null>(null);
   const [news, setNews] = useState<NewsResponse | null>(null);
   const [officialAlerts, setOfficialAlerts] = useState<OfficialAlert[]>([]);
+  const [alertsFeedFailed, setAlertsFeedFailed] = useState(false);
   const [loadingWeather, setLoadingWeather] = useState(true);
   const [loadingRivers, setLoadingRivers] = useState(true);
   const [loadingDams, setLoadingDams] = useState(true);
@@ -493,6 +570,54 @@ export default function DashboardPage() {
   const [errorNews, setErrorNews] = useState<string | null>(null);
 
   const { showToast } = useToast();
+
+  /* ── Queue jump ───────────────────────────────────────────────────────── */
+  const sosFeedRef = React.useRef<HTMLDivElement>(null);
+  const [highlightSosId, setHighlightSosId] = useState<string | null>(null);
+  // Read the current queue without making the callback depend on it.
+  const filteredSosRef = React.useRef<SosRequest[]>([]);
+
+  /**
+   * Take the responder to the request that needs attention.
+   *
+   * Previously this only set the tab and opened the drawer — but `feeds` is
+   * already the default tab and the sidebar is already visible from `lg` up,
+   * so on desktop the button did nothing observable at all.
+   */
+  const focusRescueQueue = useCallback(() => {
+    setSidebarTab("feeds");
+    // The drawer is only modal below lg; opening it on desktop is a no-op that
+    // also hides the SOS button.
+    if (typeof window !== "undefined" && !window.matchMedia("(min-width: 1024px)").matches) {
+      setSidebarOpen(true);
+    }
+
+    const target = filteredSosRef.current.find((s) => s.status === "pending");
+    setHighlightSosId(target?.id ?? null);
+
+    // Let the tab switch and drawer transition commit before scrolling.
+    window.requestAnimationFrame(() => {
+      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      sosFeedRef.current?.scrollIntoView({
+        behavior: reduced ? "auto" : "smooth",
+        block: "start",
+      });
+    });
+  }, []);
+
+  // Clear the highlight ring once it has done its job.
+  useEffect(() => {
+    if (!highlightSosId) return;
+    const id = setTimeout(() => setHighlightSosId(null), 2500);
+    return () => clearTimeout(id);
+  }, [highlightSosId]);
+
+  // Callable from the realtime subscription without adding it as a dependency
+  // (that would resubscribe the channel on every render).
+  const focusRescueQueueRef = React.useRef(focusRescueQueue);
+  useEffect(() => {
+    focusRescueQueueRef.current = focusRescueQueue;
+  }, [focusRescueQueue]);
 
   /* The sidebar is a modal drawer below `lg` (it has a dismiss backdrop), so
      it should behave like one: lock the page behind it and close on Escape.
@@ -647,34 +772,118 @@ export default function DashboardPage() {
   const fetchAlerts = useCallback(async () => {
     try {
       const res = await fetch("/api/alerts");
-      if (!res.ok) return;
+      if (!res.ok) {
+        setAlertsFeedFailed(true);
+        return;
+      }
       const data: AlertsResponse = await res.json();
-      if (data.success) setOfficialAlerts(data.alerts);
+      if (data.success) {
+        setOfficialAlerts(data.alerts);
+        setAlertsFeedFailed(false);
+      } else {
+        setAlertsFeedFailed(true);
+      }
     } catch {
-      // Keep the last known alerts; consumers fall back to derived bands.
+      // Keep the last known alerts; consumers fall back to derived bands. The
+      // ticker still says the feed is unreachable rather than "all clear".
+      setAlertsFeedFailed(true);
     }
   }, []);
 
   /* ── Fetching Supabase Incident Data ──────────────────────────────────── */
-  const fetchAll = useCallback(async () => {
-    setLoading(true);
-    const [{ data: rData }, { data: sData }] = await Promise.all([
-      supabase
-        .from("flood_reports")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(100),
-      supabase
-        .from("sos_requests")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(100),
-    ]);
-    if (rData) setReports(rData);
-    if (sData) setSosRequests(sData);
-    markSynced("incidents");
-    setLoading(false);
-  }, [markSynced]);
+  /**
+   * Load the rescue queue and report feed.
+   *
+   * `silent` is used by the 60s realtime-fallback poll: without it every poll
+   * blanked the queue to skeleton cards, on exactly the degraded network the
+   * fallback exists for.
+   *
+   * Failure must never look like an empty queue. A rescuer seeing "No matching
+   * SOS requests" has to be able to trust that it means nobody is waiting — so
+   * an error sets `errorIncidents` and the sync stamp is only updated on
+   * success.
+   */
+  const fetchAll = useCallback(
+    async (silent = false) => {
+      if (!silent) setLoading(true);
+      try {
+        const [reportsRes, sosRes] = await Promise.all([
+          supabase
+            .from("flood_reports")
+            .select("*")
+            .order("created_at", { ascending: false })
+            .limit(100),
+          supabase
+            .from("sos_requests")
+            .select("*")
+            .order("created_at", { ascending: false })
+            .limit(100),
+        ]);
+
+        const failure = reportsRes.error ?? sosRes.error;
+        if (failure) {
+          setErrorIncidents(failure.message);
+          return; // keep whatever we last showed; do NOT stamp a fresh sync
+        }
+
+        // Merge rather than replace: a realtime INSERT that landed while this
+        // request was in flight would otherwise be overwritten by the older
+        // snapshot, and an optimistic rescue flag would be reverted.
+        if (reportsRes.data) setReports((prev) => mergeById(reportsRes.data, prev));
+        if (sosRes.data) setSosRequests((prev) => mergeById(sosRes.data, prev));
+        setErrorIncidents(null);
+        markSynced("incidents");
+      } catch (err) {
+        setErrorIncidents(
+          err instanceof Error ? err.message : "Could not reach the rescue queue"
+        );
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    },
+    [markSynced]
+  );
+
+  /* ── Manual sync ──────────────────────────────────────────────────────── */
+  const [syncing, setSyncing] = useState(false);
+
+  /**
+   * Refresh every feed on the page at once — weather, rivers, dams, news,
+   * official alerts and the incident queue (SOS and flood reports).
+   *
+   * The panel headers each show how stale they are, but until now nothing
+   * could act on that: the only way to pull fresh data was to reload the page
+   * or wait out a 15-minute timer. During an event, "I can see this is 12
+   * minutes old" and "I can do something about it" have to be the same
+   * gesture.
+   *
+   * Every fetch runs `silent` — a manual sync must not blank populated panels
+   * back to skeletons, which is the one thing that makes a refresh feel like a
+   * data loss.
+   */
+  const syncAll = useCallback(async () => {
+    setSyncing(true);
+    try {
+      await Promise.all([
+        fetchWeather(coords.lat, coords.lng, true),
+        fetchRivers(true),
+        fetchDams(true),
+        fetchNews(true),
+        fetchAlerts(),
+        fetchAll(true),
+      ]);
+    } finally {
+      setSyncing(false);
+    }
+  }, [
+    coords,
+    fetchWeather,
+    fetchRivers,
+    fetchDams,
+    fetchNews,
+    fetchAlerts,
+    fetchAll,
+  ]);
 
   /* ── Setup triggers on load ───────────────────────────────────────────── */
   useEffect(() => {
@@ -709,8 +918,9 @@ export default function DashboardPage() {
   // the SOS feed keeps moving.
   useEffect(() => {
     if (connected) return;
+    // `silent` — a background poll must not blank the queue to skeletons.
     const id = setInterval(() => {
-      fetchAll();
+      fetchAll(true);
     }, 60 * 1000);
     return () => clearInterval(id);
   }, [connected, fetchAll]);
@@ -779,10 +989,7 @@ export default function DashboardPage() {
                 duration: nearby ? null : 10000,
                 action: {
                   label: "Open queue",
-                  onClick: () => {
-                    setSidebarTab("feeds");
-                    setSidebarOpen(true);
-                  },
+                  onClick: () => focusRescueQueueRef.current(),
                 },
               });
             }
@@ -881,6 +1088,11 @@ export default function DashboardPage() {
     return list;
   }, [sosRequests, districtFilter, geoLocated, coords]);
 
+  // Mirror for focusRescueQueue, which must not depend on the list itself.
+  useEffect(() => {
+    filteredSosRef.current = filteredSos;
+  }, [filteredSos]);
+
   // 3. Process Rivers Telemetry (Filter or Sort)
   const filteredRivers = React.useMemo(() => {
     if (!rivers) return [];
@@ -967,7 +1179,7 @@ export default function DashboardPage() {
   );
 
   const sidebarTabClass = (active: boolean) =>
-    `flex-1 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wider rounded-sm transition ${
+    `flex-1 py-2.5 font-mono text-[10px] font-bold uppercase tracking-wider rounded-sm transition ${
       active
         ? "bg-surface-800 text-surface-100"
         : "text-surface-500 hover:text-surface-300"
@@ -1004,12 +1216,24 @@ export default function DashboardPage() {
               </span>
             </div>
 
-            <Link
-              href="/admin"
-              className="font-mono text-[9px] font-bold uppercase tracking-widest text-surface-600 transition hover:text-surface-300"
+            {/* Sync every feed at once. Deliberately next to the live
+                indicator: "is this current?" and "make it current" belong in
+                the same corner of the screen. */}
+            <button
+              onClick={syncAll}
+              disabled={syncing}
+              aria-label="Sync all feeds — weather, rivers, dams, news, alerts and the rescue queue"
+              title="Sync all feeds"
+              className="flex items-center gap-1.5 rounded-sm border border-surface-800 bg-surface-900 px-2.5 py-2 text-surface-300 transition hover:bg-surface-850 hover:text-surface-100 disabled:opacity-60"
             >
-              Ops
-            </Link>
+              <RefreshCw className={`h-3 w-3 ${syncing ? "animate-spin" : ""}`} />
+              <span className="font-mono text-[9px] font-bold uppercase tracking-widest">
+                {syncing ? "Syncing" : "Sync"}
+              </span>
+            </button>
+
+            {/* No link to /admin here — the ops console is for operators, not
+                the public. The route still exists and is reachable directly. */}
 
             {/* Mobile Sidebar Trigger */}
             <button
@@ -1023,7 +1247,10 @@ export default function DashboardPage() {
         </header>
 
         {/* ── Emergency Alerts Banner Ticker ──────────────────────────────── */}
-        <GovtAlertsTicker />
+        <GovtAlertsTicker
+          officialAlerts={officialAlerts}
+          officialFeedFailed={alertsFeedFailed}
+        />
 
         {/* ── SOS command strip — the headline state of the whole system ──── */}
         {pendingSosCount > 0 && (
@@ -1041,11 +1268,8 @@ export default function DashboardPage() {
               </span>
             </div>
             <button
-              onClick={() => {
-                setSidebarTab("feeds");
-                setSidebarOpen(true);
-              }}
-              className="rounded-sm border border-emergency-500/60 px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider text-emergency-300 transition hover:bg-emergency-900/40"
+              onClick={focusRescueQueue}
+              className="rounded-sm border border-emergency-500/60 px-4 py-2.5 text-[11px] font-bold uppercase tracking-wider text-emergency-300 transition hover:bg-emergency-900/40"
             >
               Open rescue queue
             </button>
@@ -1099,7 +1323,7 @@ export default function DashboardPage() {
                 const matched = DISTRICTS.find((d) => d.name === e.target.value);
                 if (matched) setCoords({ lat: matched.lat, lng: matched.lng });
               }}
-              className="rounded-sm border border-surface-700 bg-surface-850 px-2 py-1.5 text-xs text-surface-200 outline-none focus:border-surface-400"
+              className="rounded-sm border border-surface-700 bg-surface-850 px-2 py-2.5 text-xs text-surface-200 outline-none focus:border-surface-400"
             >
               <option value="all">All Districts</option>
               {DISTRICTS.map((d) => (
@@ -1113,7 +1337,7 @@ export default function DashboardPage() {
             <button
               onClick={detectLocation}
               disabled={locating}
-              className="rounded-sm border border-surface-700 bg-surface-850 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-surface-300 transition hover:bg-surface-800 hover:text-surface-100 disabled:opacity-60"
+              className="rounded-sm border border-surface-700 bg-surface-850 px-2.5 py-2.5 text-[10px] font-bold uppercase tracking-wider text-surface-300 transition hover:bg-surface-800 hover:text-surface-100 disabled:opacity-60"
             >
               {locating ? "Locating…" : geoLocated ? "GPS Locked" : "Detect Location"}
             </button>
@@ -1134,7 +1358,7 @@ export default function DashboardPage() {
                 setGeoLocated(false);
                 setCoords({ lat: 9.9312, lng: 76.2673 }); // Reset to Kochi center
               }}
-              className="text-[10px] font-bold uppercase tracking-widest text-surface-500 hover:text-surface-200"
+              className="rounded-sm px-2 py-2.5 text-[10px] font-bold uppercase tracking-widest text-surface-500 hover:text-surface-200"
             >
               Reset
             </button>
@@ -1154,8 +1378,14 @@ export default function DashboardPage() {
                 context — so the map painted straight over the open sidebar.
                 Isolating contains every map z-index below the drawer. */}
             <div
+              /* Taller from `lg` up. At 420px the map column ran out well
+                 above the monitoring panel beside it, leaving a band of dead
+                 space down the left of the page — the two columns now finish
+                 close to level on a normal desktop viewport. Phones keep the
+                 short map: there the panel is a drawer, nothing to align to,
+                 and a tall map just pushes the stats off-screen. */
               className={`relative isolate ${
-                isFullscreenMap ? "h-[70vh]" : "h-[300px] lg:h-[420px]"
+                isFullscreenMap ? "h-[70vh]" : "h-[300px] lg:h-[520px] xl:h-[600px]"
               }`}
             >
               {/* Map maximize control */}
@@ -1219,6 +1449,10 @@ export default function DashboardPage() {
             />
           )}
 
+          {/* Unmounted in fullscreen, not just hidden: the in-map feed below
+              renders the same SOS and report lists, so a CSS-hidden aside
+              mounted every card a second time. */}
+          {!isFullscreenMap && (
           <aside
             className={`fixed bottom-0 right-0 top-0 z-[1050] flex w-[340px] max-w-[85vw] flex-col gap-4 overflow-y-auto border-l border-surface-800 bg-surface-950 p-4 transition-transform duration-300 lg:sticky lg:top-16 lg:z-0 lg:max-h-[calc(100vh-5rem)] lg:w-[380px] lg:max-w-none lg:border-l-0 lg:bg-transparent lg:p-0 lg:transition-none ${
               /* `lg:translate-x-0`, not `lg:hidden`: hiding the closed drawer at
@@ -1226,7 +1460,7 @@ export default function DashboardPage() {
                  user closed it and widened the viewport, because the only
                  re-open button is itself `lg:hidden`. */
               sidebarOpen ? "translate-x-0" : "translate-x-full lg:translate-x-0"
-            } ${isFullscreenMap ? "hidden" : ""}`}
+            }`}
             aria-label="Monitoring panel"
           >
             {/* Mobile close sidebar panel */}
@@ -1235,7 +1469,7 @@ export default function DashboardPage() {
               <button
                 onClick={() => setSidebarOpen(false)}
                 aria-label="Close monitoring panel"
-                className="rounded-sm bg-surface-850 p-1 text-surface-400"
+                className="rounded-sm bg-surface-850 p-2.5 text-surface-400"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -1283,7 +1517,7 @@ export default function DashboardPage() {
                       <button
                         onClick={detectLocation}
                         disabled={locating}
-                        className="text-[9px] font-bold uppercase tracking-wider text-surface-400 hover:text-surface-100 disabled:opacity-60"
+                        className="rounded-sm px-2 py-2 text-[10px] font-bold uppercase tracking-wider text-surface-400 hover:text-surface-100 disabled:opacity-60"
                       >
                         {locating ? "Locating…" : "Locate"}
                       </button>
@@ -1660,7 +1894,7 @@ export default function DashboardPage() {
               /* Emergency Feeds Tab Render */
               <div className="flex flex-1 flex-col gap-4">
                 {/* SOS Requests list feed */}
-                <div className="space-y-3">
+                <div ref={sosFeedRef} id="sos-feed" className="scroll-mt-20 space-y-3">
                   <PanelHeader
                     title={`SOS Feed (${filteredSos.length})`}
                     chip="LIVE"
@@ -1669,10 +1903,21 @@ export default function DashboardPage() {
                   <div className="max-h-[320px] space-y-2.5 overflow-y-auto pr-1">
                     {loading ? (
                       Array.from({ length: 2 }).map((_, i) => <SkeletonCard key={i} />)
+                    ) : errorIncidents ? (
+                      /* Never fall through to the empty state on failure — an
+                         empty rescue queue must mean nobody is waiting. */
+                      <FeedError message={errorIncidents} onRetry={() => fetchAll()} />
                     ) : filteredSos.length === 0 ? (
                       <EmptyState message="No matching SOS requests." />
                     ) : (
-                      filteredSos.map((sos) => <SosCard key={sos.id} sos={sos} onResolve={handleResolveSos} />)
+                      filteredSos.map((sos) => (
+                        <SosCard
+                          key={sos.id}
+                          sos={sos}
+                          onResolve={handleResolveSos}
+                          highlighted={sos.id === highlightSosId}
+                        />
+                      ))
                     )}
                   </div>
                 </div>
@@ -1687,6 +1932,8 @@ export default function DashboardPage() {
                   <div className="max-h-[320px] space-y-2.5 overflow-y-auto pr-1">
                     {loading ? (
                       Array.from({ length: 2 }).map((_, i) => <SkeletonCard key={i} />)
+                    ) : errorIncidents ? (
+                      <FeedError message={errorIncidents} onRetry={() => fetchAll()} />
                     ) : filteredReports.length === 0 ? (
                       <EmptyState message="No matching flood reports." />
                     ) : (
@@ -1699,6 +1946,7 @@ export default function DashboardPage() {
               </div>
             )}
           </aside>
+          )}
         </div>
 
         {/* Footer */}
@@ -1715,14 +1963,16 @@ export default function DashboardPage() {
         </footer>
       </main>
 
-      {/* One floating action, and it is the SOS.
-          Flood reporting lives on the modal's second tab — a separate FAB only
-          competed for the tap that matters and, on a 375px screen, crowded the
-          one control someone in danger is reaching for. */}
+      {/* One floating action for both reports. A second FAB only competed for
+          the tap that matters and, on a 375px screen, crowded the one control
+          someone in danger is reaching for — so flood reporting shares this
+          button and lives on the modal's other tab. The label names both,
+          because "Need Help" hid the fact that this is also how you report a
+          flood you are merely standing next to. It still opens on SOS. */}
       <button
         id="fab-report"
         onClick={() => openReportModal("sos")}
-        aria-label="Send an SOS — request rescue"
+        aria-label="Send an SOS request, or report a flood level"
         /* Hidden while the mobile drawer is open — the drawer is modal (it has
            a dismiss backdrop), so a button floating over it just obscured the
            rescue queue. On lg the drawer is a static column, so it stays. */
@@ -1734,7 +1984,7 @@ export default function DashboardPage() {
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-70" />
           <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
         </span>
-        <span className="truncate">SOS — Need Help</span>
+        <span className="truncate">SOS/Flood Report</span>
       </button>
 
       {/* Incident reporting modal */}

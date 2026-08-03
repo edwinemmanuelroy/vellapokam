@@ -120,7 +120,7 @@ export default function NotificationConsent({
             </p>
           </div>
           {variant === "banner" && (
-            <button onClick={dismiss} aria-label="Dismiss" className="text-surface-600 hover:text-surface-300">
+            <button onClick={dismiss} aria-label="Dismiss" className="-m-2 rounded-sm p-2 text-surface-600 hover:text-surface-300">
               <X className="h-4 w-4" />
             </button>
           )}
@@ -145,7 +145,7 @@ export default function NotificationConsent({
             </p>
           </div>
           {variant === "banner" && (
-            <button onClick={dismiss} aria-label="Dismiss" className="text-surface-600 hover:text-surface-300">
+            <button onClick={dismiss} aria-label="Dismiss" className="-m-2 rounded-sm p-2 text-surface-600 hover:text-surface-300">
               <X className="h-4 w-4" />
             </button>
           )}
@@ -214,7 +214,7 @@ export default function NotificationConsent({
         </div>
 
         {variant === "banner" && (
-          <button onClick={dismiss} aria-label="Dismiss" className="text-surface-600 hover:text-surface-300">
+          <button onClick={dismiss} aria-label="Dismiss" className="-m-2 rounded-sm p-2 text-surface-600 hover:text-surface-300">
             <X className="h-4 w-4" />
           </button>
         )}

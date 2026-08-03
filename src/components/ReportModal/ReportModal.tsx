@@ -2,7 +2,6 @@
 
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import dynamic from "next/dynamic";
-import imageCompression from "browser-image-compression";
 import { supabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 
 const LocationPickerMap = dynamic(() => import("./LocationPickerMap"), {
@@ -268,6 +267,9 @@ export default function ReportModal({
         useWebWorker: true,
       };
       try {
+        // Loaded on demand: 21KB gzip that only matters once someone actually
+        // attaches a large photo, so it stays off the landing-page bundle.
+        const { default: imageCompression } = await import("browser-image-compression");
         uploadFile = await imageCompression(file, options);
       } catch (err) {
         console.error("Image compression failed, uploading original:", err);
@@ -511,7 +513,7 @@ export default function ReportModal({
                 : "text-surface-500 hover:text-surface-300"
             }`}
           >
-            Flood Level
+            Flood Report
           </button>
           <button
             onClick={() => { setTab("sos"); setFormError(null); setSuccess(false); }}
@@ -521,7 +523,7 @@ export default function ReportModal({
                 : "text-surface-500 hover:text-surface-300"
             }`}
           >
-            SOS / Need Help
+            SOS Report
           </button>
         </div>
 
@@ -584,10 +586,11 @@ export default function ReportModal({
 
               {/* Description */}
               <div>
-                <label className="mb-2 block text-sm font-semibold text-surface-200">
+                <label htmlFor="report-description" className="mb-2 block text-sm font-semibold text-surface-200">
                   Description
                 </label>
                 <textarea
+                  id="report-description"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   rows={3}
@@ -612,6 +615,7 @@ export default function ReportModal({
                     <button
                       type="button"
                       onClick={clearImage}
+                      aria-label="Remove photo"
                       className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white transition hover:bg-black/80"
                     >
                       <X className="h-3 w-3" />
@@ -658,10 +662,11 @@ export default function ReportModal({
 
               {/* Name */}
               <div>
-                <label className="mb-2 block text-sm font-semibold text-surface-200">
+                <label htmlFor="sos-name" className="mb-2 block text-sm font-semibold text-surface-200">
                   Your Name
                 </label>
                 <input
+                  id="sos-name"
                   type="text"
                   value={sosName}
                   onChange={(e) => setSosName(e.target.value)}
@@ -674,10 +679,11 @@ export default function ReportModal({
 
               {/* Phone */}
               <div>
-                <label className="mb-2 block text-sm font-semibold text-surface-200">
+                <label htmlFor="sos-phone" className="mb-2 block text-sm font-semibold text-surface-200">
                   Phone Number
                 </label>
                 <input
+                  id="sos-phone"
                   type="tel"
                   inputMode="tel"
                   autoComplete="tel"
@@ -697,16 +703,21 @@ export default function ReportModal({
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
+                    aria-label="One fewer person"
                     onClick={() => setSosPeople((p) => Math.max(1, p - 1))}
                     className="flex h-10 w-10 items-center justify-center rounded-lg border border-surface-700 bg-surface-850 text-lg font-bold text-surface-300 transition hover:bg-surface-800"
                   >
                     −
                   </button>
-                  <span className="w-12 text-center text-xl font-bold tabular-nums text-surface-100">
+                  <span
+                    aria-live="polite"
+                    className="w-12 text-center text-xl font-bold tabular-nums text-surface-100"
+                  >
                     {sosPeople}
                   </span>
                   <button
                     type="button"
+                    aria-label="One more person"
                     onClick={() => setSosPeople((p) => p + 1)}
                     className="flex h-10 w-10 items-center justify-center rounded-lg border border-surface-700 bg-surface-850 text-lg font-bold text-surface-300 transition hover:bg-surface-800"
                   >

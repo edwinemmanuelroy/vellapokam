@@ -18,7 +18,7 @@ import {
   TILE_MAX_ZOOM,
   KERALA_BOUNDS,
 } from "@/lib/mapConfig";
-import { formatRelativeTime } from "@/lib/format";
+import { buildDirectionsUrl, buildDispatchMessage, formatRelativeTime } from "@/lib/format";
 import { Crosshair } from "lucide-react";
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -217,6 +217,64 @@ const createRiverIcon = memoizeIcon(
 );
 
 /* ════════════════════════════════════════════════════════════════════════════
+   Scroll gate
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Give the page back its scroll.
+ *
+ * Leaflet's `scrollWheelZoom` swallows every wheel event over the map, so a
+ * two-finger trackpad scroll aimed at the page zoomed the map instead — and
+ * because the map is 520px tall on desktop, it is very hard to scroll past.
+ *
+ * The map now only zooms on a deliberate gesture: a trackpad pinch, or
+ * ctrl/⌘ + wheel. Both arrive as a wheel event with `ctrlKey` set (macOS and
+ * Windows both synthesise pinch this way), and a plain scroll does not — so
+ * one flag separates "I want to move down the page" from "I want to zoom".
+ * The +/− control and double-click still zoom as before.
+ *
+ * Two details this depends on:
+ *
+ *  - The listener is on `document` in the capture phase, so it runs before
+ *    Leaflet's own handler on the container and can decide whether that
+ *    handler should be live for this event at all.
+ *  - `preventDefault` on the zoom path is load-bearing: ctrl + wheel is the
+ *    browser's own page-zoom shortcut, and a listener enabled mid-dispatch
+ *    does not fire for the event that enabled it. Without this the first
+ *    pinch would zoom the whole browser window instead of the map.
+ */
+function ScrollZoomGate() {
+  const map = useMap();
+
+  React.useEffect(() => {
+    const container = map.getContainer();
+
+    const onWheelCapture = (e: WheelEvent) => {
+      if (!container.contains(e.target as Node)) return;
+
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        if (!map.scrollWheelZoom.enabled()) map.scrollWheelZoom.enable();
+      } else if (map.scrollWheelZoom.enabled()) {
+        map.scrollWheelZoom.disable();
+      }
+    };
+
+    document.addEventListener("wheel", onWheelCapture, {
+      capture: true,
+      passive: false,
+    });
+
+    return () => {
+      document.removeEventListener("wheel", onWheelCapture, { capture: true });
+      map.scrollWheelZoom.disable();
+    };
+  }, [map]);
+
+  return null;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
    Recenter helper
    ════════════════════════════════════════════════════════════════════════════ */
 
@@ -261,7 +319,7 @@ function PopupAction({
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className={`flex items-center justify-center rounded-sm border px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider transition ${
+      className={`flex items-center justify-center rounded-sm border px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider transition ${
         danger
           ? "border-emergency-600/60 text-emergency-400 hover:bg-emergency-950/60"
           : "border-surface-600 text-surface-200 hover:bg-surface-800"
@@ -364,7 +422,9 @@ export default function MapContent({ reports, sosRequests, dams = [], rivers = [
         maxZoom={TILE_MAX_ZOOM}
         maxBounds={KERALA_BOUNDS}
         maxBoundsViscosity={1.0}
-        scrollWheelZoom={true}
+        /* Off by default — `ScrollZoomGate` turns it on only for a pinch or
+           ctrl/⌘ + wheel, so a plain scroll moves the page. */
+        scrollWheelZoom={false}
         className="h-full w-full"
         style={{ background: "#dee2e6" }}
       >
@@ -378,6 +438,7 @@ export default function MapContent({ reports, sosRequests, dams = [], rivers = [
           updateWhenIdle={true}
         />
 
+        <ScrollZoomGate />
         <RecenterButton />
 
         {/* ── Flood report markers ────────────────────────────────────────── */}
@@ -425,7 +486,7 @@ export default function MapContent({ reports, sosRequests, dams = [], rivers = [
                       {formatRelativeTime(report.created_at)}
                     </span>
                     <PopupAction
-                      href={`https://www.google.com/maps/dir/?api=1&destination=${report.latitude},${report.longitude}`}
+                      href={buildDirectionsUrl(report.latitude, report.longitude)}
                       label="Directions"
                     />
                   </div>
@@ -437,10 +498,8 @@ export default function MapContent({ reports, sosRequests, dams = [], rivers = [
         {/* ── SOS request markers ─────────────────────────────────────────── */}
         {showSos &&
           sosRequests.map((sos) => {
-            const googleNavUrl = `https://www.google.com/maps/dir/?api=1&destination=${sos.latitude},${sos.longitude}`;
-            const whatsappText = encodeURIComponent(
-              `*KERALA FLOOD EMERGENCY DISPATCH*\nName: ${sos.name}\nPhone: ${sos.phone}\nPeople Trapped: ${sos.people_count}\nNeeds: ${sos.needs.join(", ") || "Immediate Rescue"}\nGPS: https://maps.google.com/?q=${sos.latitude},${sos.longitude}`
-            );
+            const googleNavUrl = buildDirectionsUrl(sos.latitude, sos.longitude);
+            const whatsappText = encodeURIComponent(buildDispatchMessage(sos));
             const whatsappUrl = `https://wa.me/?text=${whatsappText}`;
             const isPending = sos.status === "pending";
 
@@ -473,7 +532,7 @@ export default function MapContent({ reports, sosRequests, dams = [], rivers = [
                       </span>
                       <a
                         href={`tel:${sos.phone}`}
-                        className="font-bold text-surface-100 hover:underline"
+                        className="inline-block rounded-sm py-2 font-bold text-surface-100 hover:underline"
                       >
                         {sos.phone}
                       </a>
