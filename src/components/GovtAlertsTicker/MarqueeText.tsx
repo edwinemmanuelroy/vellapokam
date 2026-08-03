@@ -73,9 +73,17 @@ export default function MarqueeText({ text, className = "", onDurationChange }: 
   const scrolling = duration !== null && !reducedMotion;
 
   if (!scrolling) {
+    // Wrap rather than truncate. Under prefers-reduced-motion the scroll is
+    // disabled, and truncating left a long government warning clipped to one
+    // line with no way to read the rest — the alert became unreadable for
+    // exactly the users who opted out of motion.
     return (
-      <div ref={containerRef} className={`min-w-0 overflow-hidden ${className}`}>
-        <span ref={contentRef} className="block truncate">
+      <div ref={containerRef} className={`min-w-0 ${className}`}>
+        <span
+          ref={contentRef}
+          className={reducedMotion ? "block" : "block truncate"}
+          title={text}
+        >
           {text}
         </span>
       </div>
