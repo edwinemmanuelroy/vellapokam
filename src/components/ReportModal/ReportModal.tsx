@@ -513,7 +513,7 @@ export default function ReportModal({
                 : "text-surface-500 hover:text-surface-300"
             }`}
           >
-            Flood Level
+            Flood Report
           </button>
           <button
             onClick={() => { setTab("sos"); setFormError(null); setSuccess(false); }}
@@ -523,7 +523,7 @@ export default function ReportModal({
                 : "text-surface-500 hover:text-surface-300"
             }`}
           >
-            SOS / Need Help
+            SOS Report
           </button>
         </div>
 

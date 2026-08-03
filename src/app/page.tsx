@@ -26,7 +26,7 @@ import ReportModal from "@/components/ReportModal/ReportModal";
 import GovtAlertsTicker from "@/components/GovtAlertsTicker/GovtAlertsTicker";
 import NotificationConsent from "@/components/Notifications/NotificationConsent";
 import { useToast } from "@/components/Toast/ToastProvider";
-import { Loader2, Maximize2, Menu, Minimize2, X } from "lucide-react";
+import { Loader2, Maximize2, Menu, Minimize2, RefreshCw, X } from "lucide-react";
 
 /** Radius within which a new SOS is treated as "near you". */
 const NEARBY_RADIUS_KM = 25;
@@ -844,6 +844,47 @@ export default function DashboardPage() {
     [markSynced]
   );
 
+  /* ── Manual sync ──────────────────────────────────────────────────────── */
+  const [syncing, setSyncing] = useState(false);
+
+  /**
+   * Refresh every feed on the page at once — weather, rivers, dams, news,
+   * official alerts and the incident queue (SOS and flood reports).
+   *
+   * The panel headers each show how stale they are, but until now nothing
+   * could act on that: the only way to pull fresh data was to reload the page
+   * or wait out a 15-minute timer. During an event, "I can see this is 12
+   * minutes old" and "I can do something about it" have to be the same
+   * gesture.
+   *
+   * Every fetch runs `silent` — a manual sync must not blank populated panels
+   * back to skeletons, which is the one thing that makes a refresh feel like a
+   * data loss.
+   */
+  const syncAll = useCallback(async () => {
+    setSyncing(true);
+    try {
+      await Promise.all([
+        fetchWeather(coords.lat, coords.lng, true),
+        fetchRivers(true),
+        fetchDams(true),
+        fetchNews(true),
+        fetchAlerts(),
+        fetchAll(true),
+      ]);
+    } finally {
+      setSyncing(false);
+    }
+  }, [
+    coords,
+    fetchWeather,
+    fetchRivers,
+    fetchDams,
+    fetchNews,
+    fetchAlerts,
+    fetchAll,
+  ]);
+
   /* ── Setup triggers on load ───────────────────────────────────────────── */
   useEffect(() => {
     detectLocation();
@@ -1175,6 +1216,22 @@ export default function DashboardPage() {
               </span>
             </div>
 
+            {/* Sync every feed at once. Deliberately next to the live
+                indicator: "is this current?" and "make it current" belong in
+                the same corner of the screen. */}
+            <button
+              onClick={syncAll}
+              disabled={syncing}
+              aria-label="Sync all feeds — weather, rivers, dams, news, alerts and the rescue queue"
+              title="Sync all feeds"
+              className="flex items-center gap-1.5 rounded-sm border border-surface-800 bg-surface-900 px-2.5 py-2 text-surface-300 transition hover:bg-surface-850 hover:text-surface-100 disabled:opacity-60"
+            >
+              <RefreshCw className={`h-3 w-3 ${syncing ? "animate-spin" : ""}`} />
+              <span className="font-mono text-[9px] font-bold uppercase tracking-widest">
+                {syncing ? "Syncing" : "Sync"}
+              </span>
+            </button>
+
             {/* No link to /admin here — the ops console is for operators, not
                 the public. The route still exists and is reachable directly. */}
 
@@ -1321,8 +1378,14 @@ export default function DashboardPage() {
                 context — so the map painted straight over the open sidebar.
                 Isolating contains every map z-index below the drawer. */}
             <div
+              /* Taller from `lg` up. At 420px the map column ran out well
+                 above the monitoring panel beside it, leaving a band of dead
+                 space down the left of the page — the two columns now finish
+                 close to level on a normal desktop viewport. Phones keep the
+                 short map: there the panel is a drawer, nothing to align to,
+                 and a tall map just pushes the stats off-screen. */
               className={`relative isolate ${
-                isFullscreenMap ? "h-[70vh]" : "h-[300px] lg:h-[420px]"
+                isFullscreenMap ? "h-[70vh]" : "h-[300px] lg:h-[520px] xl:h-[600px]"
               }`}
             >
               {/* Map maximize control */}
@@ -1900,14 +1963,16 @@ export default function DashboardPage() {
         </footer>
       </main>
 
-      {/* One floating action, and it is the SOS.
-          Flood reporting lives on the modal's second tab — a separate FAB only
-          competed for the tap that matters and, on a 375px screen, crowded the
-          one control someone in danger is reaching for. */}
+      {/* One floating action for both reports. A second FAB only competed for
+          the tap that matters and, on a 375px screen, crowded the one control
+          someone in danger is reaching for — so flood reporting shares this
+          button and lives on the modal's other tab. The label names both,
+          because "Need Help" hid the fact that this is also how you report a
+          flood you are merely standing next to. It still opens on SOS. */}
       <button
         id="fab-report"
         onClick={() => openReportModal("sos")}
-        aria-label="Send an SOS — request rescue"
+        aria-label="Send an SOS request, or report a flood level"
         /* Hidden while the mobile drawer is open — the drawer is modal (it has
            a dismiss backdrop), so a button floating over it just obscured the
            rescue queue. On lg the drawer is a static column, so it stays. */
@@ -1919,7 +1984,7 @@ export default function DashboardPage() {
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-70" />
           <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
         </span>
-        <span className="truncate">SOS — Need Help</span>
+        <span className="truncate">SOS/Flood Report</span>
       </button>
 
       {/* Incident reporting modal */}
