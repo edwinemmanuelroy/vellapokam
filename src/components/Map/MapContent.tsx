@@ -217,6 +217,64 @@ const createRiverIcon = memoizeIcon(
 );
 
 /* ════════════════════════════════════════════════════════════════════════════
+   Scroll gate
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Give the page back its scroll.
+ *
+ * Leaflet's `scrollWheelZoom` swallows every wheel event over the map, so a
+ * two-finger trackpad scroll aimed at the page zoomed the map instead — and
+ * because the map is 520px tall on desktop, it is very hard to scroll past.
+ *
+ * The map now only zooms on a deliberate gesture: a trackpad pinch, or
+ * ctrl/⌘ + wheel. Both arrive as a wheel event with `ctrlKey` set (macOS and
+ * Windows both synthesise pinch this way), and a plain scroll does not — so
+ * one flag separates "I want to move down the page" from "I want to zoom".
+ * The +/− control and double-click still zoom as before.
+ *
+ * Two details this depends on:
+ *
+ *  - The listener is on `document` in the capture phase, so it runs before
+ *    Leaflet's own handler on the container and can decide whether that
+ *    handler should be live for this event at all.
+ *  - `preventDefault` on the zoom path is load-bearing: ctrl + wheel is the
+ *    browser's own page-zoom shortcut, and a listener enabled mid-dispatch
+ *    does not fire for the event that enabled it. Without this the first
+ *    pinch would zoom the whole browser window instead of the map.
+ */
+function ScrollZoomGate() {
+  const map = useMap();
+
+  React.useEffect(() => {
+    const container = map.getContainer();
+
+    const onWheelCapture = (e: WheelEvent) => {
+      if (!container.contains(e.target as Node)) return;
+
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        if (!map.scrollWheelZoom.enabled()) map.scrollWheelZoom.enable();
+      } else if (map.scrollWheelZoom.enabled()) {
+        map.scrollWheelZoom.disable();
+      }
+    };
+
+    document.addEventListener("wheel", onWheelCapture, {
+      capture: true,
+      passive: false,
+    });
+
+    return () => {
+      document.removeEventListener("wheel", onWheelCapture, { capture: true });
+      map.scrollWheelZoom.disable();
+    };
+  }, [map]);
+
+  return null;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
    Recenter helper
    ════════════════════════════════════════════════════════════════════════════ */
 
@@ -364,7 +422,9 @@ export default function MapContent({ reports, sosRequests, dams = [], rivers = [
         maxZoom={TILE_MAX_ZOOM}
         maxBounds={KERALA_BOUNDS}
         maxBoundsViscosity={1.0}
-        scrollWheelZoom={true}
+        /* Off by default — `ScrollZoomGate` turns it on only for a pinch or
+           ctrl/⌘ + wheel, so a plain scroll moves the page. */
+        scrollWheelZoom={false}
         className="h-full w-full"
         style={{ background: "#dee2e6" }}
       >
@@ -378,6 +438,7 @@ export default function MapContent({ reports, sosRequests, dams = [], rivers = [
           updateWhenIdle={true}
         />
 
+        <ScrollZoomGate />
         <RecenterButton />
 
         {/* ── Flood report markers ────────────────────────────────────────── */}
