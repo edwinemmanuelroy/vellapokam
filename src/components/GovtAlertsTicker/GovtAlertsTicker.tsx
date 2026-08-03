@@ -5,74 +5,17 @@ import Link from "next/link";
 import { supabase } from "@/lib/supabaseClient";
 import type { Advisory } from "@/types/database";
 import type { OfficialAlert } from "@/types/hydromet";
+// The ticker and the full listing on /hotlines render the same items — one
+// rotating, one expanded — so the normalisation is shared rather than copied.
+import {
+  advisoryToItem,
+  officialToItem,
+  FEED_UNAVAILABLE,
+  PLACEHOLDER,
+  type AdvisoryItem,
+} from "@/lib/advisories";
 import MarqueeText from "./MarqueeText";
 import { Loader2 } from "lucide-react";
-
-/**
- * One rotation slot in the ticker — either an official SACHET alert
- * (IMD / CWC / SDMA, fetched automatically) or an operator-published advisory.
- */
-interface TickerItem {
-  key: string;
-  title: string;
-  message: string;
-  tone: "critical" | "warning" | "info";
-  createdAt: string | null;
-  official: boolean;
-}
-
-/**
- * Shown only when neither the official feed nor operators have anything live.
- *
- * This deliberately contains no invented alert content — placeholder text must
- * never be mistakable for a real government warning.
- */
-const PLACEHOLDER: TickerItem = {
-  key: "placeholder",
-  title: "No Active Advisory",
-  message:
-    "No official alert or operator advisory is currently live. For warnings check KSDMA / IMD directly, or dial 1077 for your district control room.",
-  tone: "info",
-  createdAt: null,
-  official: false,
-};
-
-/**
- * Shown when the advisory feed could not be reached. Distinct from
- * PLACEHOLDER on purpose: "we found no warnings" and "we could not check for
- * warnings" must never look the same.
- */
-const FEED_UNAVAILABLE: TickerItem = {
-  key: "feed-unavailable",
-  title: "Advisory Feed Unavailable",
-  message:
-    "Could not reach the alert feed — there may be active warnings this page cannot show. Check KSDMA / IMD directly, or dial 1077 for your district control room.",
-  tone: "warning",
-  createdAt: null,
-  official: false,
-};
-
-function officialToItem(a: OfficialAlert): TickerItem {
-  return {
-    key: `official-${a.id}`,
-    title: `${a.source} · ${a.event}`,
-    message: a.message,
-    tone: a.severity === "red" ? "critical" : "warning",
-    createdAt: a.start,
-    official: true,
-  };
-}
-
-function advisoryToItem(a: Advisory): TickerItem {
-  return {
-    key: `advisory-${a.id}`,
-    title: a.title,
-    message: a.message,
-    tone: a.type === "critical" ? "critical" : a.type === "warning" ? "warning" : "info",
-    createdAt: a.created_at,
-    official: false,
-  };
-}
 
 interface Props {
   /**
@@ -140,7 +83,7 @@ export default function GovtAlertsTicker({
   }, [fetchAdvisories]);
 
   // One rotation: official alerts first, then operator advisories.
-  const items = useMemo<TickerItem[]>(
+  const items = useMemo<AdvisoryItem[]>(
     () => [
       ...officialAlerts.map(officialToItem),
       ...advisories.map(advisoryToItem),
@@ -256,7 +199,7 @@ export default function GovtAlertsTicker({
             >
               {activeItem.title}
             </span>
-            {activeItem.official && (
+            {activeItem.provenance === "official" && (
               <span className="source-chip flex-shrink-0">Official</span>
             )}
             {/* `key` remounts the marquee per message so a new alert always
@@ -275,6 +218,17 @@ export default function GovtAlertsTicker({
               </span>
             )}
           </div>
+        )}
+
+        {/* Scrolling text is for noticing an alert, not reading one. This is
+            the way out to the full wording of every live advisory. */}
+        {items.length > 0 && (
+          <Link
+            href="/hotlines#advisories"
+            className="flex-shrink-0 whitespace-nowrap rounded-sm px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider text-surface-400 transition hover:text-surface-100"
+          >
+            Full text →
+          </Link>
         )}
 
         {/* Controls — text glyphs, no icons */}
