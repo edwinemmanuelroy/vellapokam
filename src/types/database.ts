@@ -8,7 +8,18 @@
 export type WaterLevel = "ankle" | "knee" | "waist" | "roof";
 export type SosStatus = "pending" | "rescued";
 
-export type FloodReport = {
+/**
+ * SHA-256 of the capability token held by the device that posted a row — the
+ * only thing that lets someone withdraw their own submission without an
+ * account. World-readable by design (SELECT is public and both tables are
+ * broadcast over realtime), which is safe because it is a hash of 256 bits of
+ * entropy. See migration 00009.
+ */
+type OwnedRow = {
+  delete_token_hash: string | null;
+};
+
+export type FloodReport = OwnedRow & {
   id: string;
   created_at: string;
   latitude: number;
@@ -19,7 +30,7 @@ export type FloodReport = {
   verified: boolean;
 };
 
-export type SosRequest = {
+export type SosRequest = OwnedRow & {
   id: string;
   created_at: string;
   name: string;
@@ -49,6 +60,8 @@ export type FloodReportInsert = {
   description: string;
   image_url?: string | null;
   verified?: boolean;
+  /** Written in the same statement as the row, so ownership is atomic. */
+  delete_token_hash?: string | null;
 };
 
 export type SosRequestInsert = {
@@ -63,6 +76,8 @@ export type SosRequestInsert = {
   status?: SosStatus;
   rescue_reported_at?: string | null;
   rescue_reported_note?: string | null;
+  /** Written in the same statement as the row, so ownership is atomic. */
+  delete_token_hash?: string | null;
 };
 
 export type AdvisoryType = "critical" | "warning" | "info";
@@ -74,6 +89,23 @@ export type Advisory = {
   message: string;
   type: AdvisoryType;
   link: string | null;
+};
+
+/** Which public table a withdrawn row came from. */
+export type WithdrawnKind = "sos" | "flood";
+
+/**
+ * A submission its author (or an operator) removed from the public dashboard.
+ * Operator-readable only — it holds the details of people who asked to be taken
+ * off a public page.
+ */
+export type WithdrawnSubmission = {
+  id: string;
+  kind: WithdrawnKind;
+  withdrawn_at: string;
+  withdrawn_by: "author" | "operator";
+  /** The original row, minus its spent token hash. */
+  payload: Record<string, unknown>;
 };
 
 export type AdvisoryInsert = {
@@ -108,6 +140,13 @@ export type Database = {
         Update: Partial<AdvisoryInsert>;
         Relationships: [];
       };
+      withdrawn_submissions: {
+        Row: WithdrawnSubmission;
+        // Written only by the withdraw_submission() function, never by a client.
+        Insert: WithdrawnSubmission;
+        Update: Partial<WithdrawnSubmission>;
+        Relationships: [];
+      };
     };
     Views: Record<
       string,
@@ -116,13 +155,20 @@ export type Database = {
         Relationships: never[];
       }
     >;
-    Functions: Record<
-      string,
-      {
-        Args: Record<string, unknown>;
-        Returns: unknown;
-      }
-    >;
+    Functions: {
+      /**
+       * Remove a submission from the public tables and archive it.
+       *
+       * Authorised either by `p_token` (the capability secret the posting
+       * device holds) or by an operator's authenticated session, in which case
+       * the token is omitted. Returns false — indistinguishably — for a bad
+       * token, an unknown id, and a row that was already withdrawn.
+       */
+      withdraw_submission: {
+        Args: { p_kind: WithdrawnKind; p_id: string; p_token?: string | null };
+        Returns: boolean;
+      };
+    };
     Enums: {
       water_level: WaterLevel;
       sos_status: SosStatus;
