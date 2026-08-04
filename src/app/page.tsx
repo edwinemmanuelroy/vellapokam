@@ -21,6 +21,14 @@ import {
 // distance maths and the district list.
 import { getDistanceKm, formatDistance } from "@/lib/geo";
 import { DISTRICTS } from "@/lib/districts";
+// Device-held proof of authorship — the substitute for accounts, which this
+// app deliberately does not have.
+import {
+  forgetSubmission,
+  ownedIdSet,
+  ownedTokenFor,
+  type OwnedKind,
+} from "@/lib/ownership";
 import DynamicMap from "@/components/Map/DynamicMap";
 import ReportModal from "@/components/ReportModal/ReportModal";
 import GovtAlertsTicker from "@/components/GovtAlertsTicker/GovtAlertsTicker";
@@ -93,6 +101,155 @@ function riverStatusClasses(status: string): { text: string; bg: string } {
 
 /* ── Small presentational helpers ────────────────────────────────────────── */
 
+/**
+ * "Remove" control for a submission this device posted.
+ *
+ * Rendered only when a capability token for the row exists in local storage —
+ * see src/lib/ownership.ts. Strangers get no control at all, which is both the
+ * requirement and the safest default: migration 00008 exists precisely to stop
+ * a passer-by hiding someone else's SOS.
+ *
+ * Shape copied from `SosCard`'s existing "Report rescued" confirm: a trigger
+ * that arms an in-place question row, spinner on the affirmative, muted Cancel,
+ * inline red error. The confirm row deliberately STAYS OPEN on failure so
+ * retrying is one tap.
+ */
+function WithdrawOwnRow({
+  kind,
+  id,
+  alreadyFlagged = false,
+  offerRescueInstead = false,
+  onWithdrawn,
+}: {
+  kind: OwnedKind;
+  id: string;
+  /** SOS only — someone has already flagged this rescue. */
+  alreadyFlagged?: boolean;
+  /** SOS only — steer "we were rescued" to the flow that keeps the record. */
+  offerRescueInstead?: boolean;
+  onWithdrawn: (id: string) => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const { showToast } = useToast();
+
+  const isSos = kind === "sos";
+
+  const question = alreadyFlagged
+    ? "Someone already reported this rescue. Remove anyway?"
+    : isSos
+    ? "Remove this SOS? Rescuers lose it immediately."
+    : "Remove this report? It leaves the map for everyone.";
+
+  const handleWithdraw = async () => {
+    const token = ownedTokenFor(id);
+    if (!token) {
+      // The token went missing between render and tap — cleared storage, or a
+      // second tab withdrew it. Never leave a button that cannot work.
+      setError("This browser can no longer remove this.");
+      onWithdrawn(id);
+      return;
+    }
+
+    setWorking(true);
+    setError(null);
+    try {
+      // An RPC returns a real boolean, so unlike the RLS-filtered update in
+      // `handleReportRescued` there is no need to count returned rows.
+      const { data, error: rpcError } = await supabase.rpc("withdraw_submission", {
+        p_kind: kind,
+        p_id: id,
+        p_token: token,
+      });
+
+      if (rpcError) {
+        setError("Could not remove it: " + rpcError.message);
+        return;
+      }
+
+      if (data === true) {
+        forgetSubmission(id);
+        onWithdrawn(id);
+        showToast({
+          title: isSos ? "Request removed" : "Report removed",
+          message: "It is off the dashboard. Operators keep a record.",
+          tone: "success",
+        });
+        return;
+      }
+
+      // false covers "already gone" and "token rejected" indistinguishably.
+      // Either way this device can do nothing further with the row.
+      forgetSubmission(id);
+      onWithdrawn(id);
+      showToast({
+        title: "Already removed",
+        message: "That submission was no longer on the dashboard.",
+        tone: "info",
+      });
+    } catch {
+      setError("Could not reach the server. Check your connection and try again.");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  if (!confirming) {
+    return (
+      <button
+        onClick={() => setConfirming(true)}
+        className="rounded-sm px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider text-surface-500 transition hover:text-surface-200"
+      >
+        {isSos ? "Remove my request" : "Remove"}
+      </button>
+    );
+  }
+
+  return (
+    <div className="w-full space-y-1.5">
+      <div className="flex w-full flex-wrap items-center gap-1.5">
+        <span className="flex-1 text-[10px] leading-relaxed text-surface-400">
+          {question}
+        </span>
+        <button
+          onClick={handleWithdraw}
+          disabled={working}
+          className={`flex items-center gap-1 rounded-sm border px-2.5 py-2.5 text-[10px] font-bold uppercase tracking-wider transition disabled:opacity-50 ${
+            /* Red only on the SOS path. Extra friction here is colour and
+               wording, never another tap — this is an emergency app. */
+            isSos
+              ? "border-emergency-600/60 text-emergency-300 hover:bg-emergency-950/60"
+              : "border-surface-500 bg-surface-800 text-surface-100 hover:bg-surface-700"
+          }`}
+        >
+          {working && <Loader2 className="h-3 w-3 animate-spin" />}
+          Yes, remove
+        </button>
+        <button
+          onClick={() => setConfirming(false)}
+          className="rounded-sm px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider text-surface-500 transition hover:text-surface-300"
+        >
+          Cancel
+        </button>
+      </div>
+
+      {/* Steers the commonest legitimate motive to the flow that preserves the
+          record, so removal does not quietly become the easier way to close an
+          SOS — which is the hole migration 00008 closed. */}
+      {offerRescueInstead && (
+        <p className="text-[10px] leading-relaxed text-surface-500">
+          Rescued? Use &ldquo;Report rescued&rdquo; instead — it keeps the record.
+        </p>
+      )}
+
+      {error && (
+        <p className="text-[10px] font-semibold text-emergency-400">{error}</p>
+      )}
+    </div>
+  );
+}
+
 const StatCard = React.memo(function StatCard({
   label,
   value,
@@ -155,7 +312,16 @@ function TrendGlyph({ trend }: { trend: string }) {
   return <span className="font-mono text-[10px] text-surface-600">•</span>;
 }
 
-const FloodReportCard = React.memo(function FloodReportCard({ report }: { report: FloodReport }) {
+const FloodReportCard = React.memo(function FloodReportCard({
+  report,
+  owned = false,
+  onWithdrawn,
+}: {
+  report: FloodReport;
+  /** True when this device holds the token that posted this report. */
+  owned?: boolean;
+  onWithdrawn?: (id: string) => void;
+}) {
   const meta = LEVEL_META[report.water_level] ?? LEVEL_META.ankle;
   const timeAgo = formatRelativeTime(report.created_at);
 
@@ -199,6 +365,11 @@ const FloodReportCard = React.memo(function FloodReportCard({ report }: { report
           {report.latitude.toFixed(4)}, {report.longitude.toFixed(4)}
         </span>
         <span>{timeAgo}</span>
+        {owned && onWithdrawn && (
+          <span className="ml-auto">
+            <WithdrawOwnRow kind="flood" id={report.id} onWithdrawn={onWithdrawn} />
+          </span>
+        )}
       </div>
     </div>
   );
@@ -207,10 +378,15 @@ const FloodReportCard = React.memo(function FloodReportCard({ report }: { report
 const SosCard = React.memo(function SosCard({
   sos,
   onResolve,
+  owned = false,
+  onWithdrawn,
   highlighted = false,
 }: {
   sos: SosRequest;
   onResolve?: (id: string) => void;
+  /** True when this device holds the token that posted this request. */
+  owned?: boolean;
+  onWithdrawn?: (id: string) => void;
   highlighted?: boolean;
 }) {
   const isPending = sos.status === "pending";
@@ -396,6 +572,21 @@ const SosCard = React.memo(function SosCard({
         )}
       </div>
 
+      {/* Kept out of the dispatch row above: Directions / Dispatch WA /
+          Report rescued are things a RESPONDER does, removal is something the
+          author does — and a fourth control there is unreachable at 340px. */}
+      {owned && onWithdrawn && (
+        <div className="mb-2.5 border-t border-surface-800 pt-2">
+          <WithdrawOwnRow
+            kind="sos"
+            id={sos.id}
+            alreadyFlagged={isReported}
+            offerRescueInstead={isPending && !isReported}
+            onWithdrawn={onWithdrawn}
+          />
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-3 font-mono text-[10px] text-surface-500">
         <span>
           {sos.latitude.toFixed(4)}, {sos.longitude.toFixed(4)}
@@ -536,6 +727,34 @@ export default function DashboardPage() {
   const openReportModal = useCallback((tab: "flood" | "sos") => {
     setModalTab(tab);
     setModalOpen(true);
+  }, []);
+
+  /* ── Ownership of submissions made from this device ───────────────────── */
+  /**
+   * Ids this browser holds a withdrawal token for. Filled after mount, never in
+   * a `useState` initialiser: this page is prerendered and hydrated, so reading
+   * storage during the first render would not match the server markup. Same
+   * approach as `IstClock` below.
+   */
+  const [ownedIds, setOwnedIds] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    setOwnedIds(ownedIdSet());
+  }, []);
+
+  /**
+   * Rows withdrawn during this session.
+   *
+   * A background poll already in flight when the withdrawal commits carries a
+   * snapshot that still contains the row, and `mergeById` would resurrect the
+   * card. Filtering incoming rows through this set closes that window.
+   */
+  const withdrawnIdsRef = React.useRef<Set<string>>(new Set());
+
+  const handleWithdrawn = useCallback((id: string) => {
+    withdrawnIdsRef.current.add(id);
+    setSosRequests((prev) => prev.filter((s) => s.id !== id));
+    setReports((prev) => prev.filter((r) => r.id !== id));
+    setOwnedIds(ownedIdSet());
   }, []);
 
   /* ── Layout & Responsive States ───────────────────────────────────────── */
@@ -829,8 +1048,18 @@ export default function DashboardPage() {
         // Merge rather than replace: a realtime INSERT that landed while this
         // request was in flight would otherwise be overwritten by the older
         // snapshot, and an optimistic rescue flag would be reverted.
-        if (reportsRes.data) setReports((prev) => mergeById(reportsRes.data, prev));
-        if (sosRes.data) setSosRequests((prev) => mergeById(sosRes.data, prev));
+        //
+        // Rows withdrawn during this session are filtered out first — this
+        // snapshot may predate the withdrawal, and merging it back would put
+        // the card someone just removed straight back on screen.
+        if (reportsRes.data) {
+          const fresh = reportsRes.data.filter((r) => !withdrawnIdsRef.current.has(r.id));
+          setReports((prev) => mergeById(fresh, prev));
+        }
+        if (sosRes.data) {
+          const fresh = sosRes.data.filter((s) => !withdrawnIdsRef.current.has(s.id));
+          setSosRequests((prev) => mergeById(fresh, prev));
+        }
         setErrorIncidents(null);
         markSynced("incidents");
       } catch (err) {
@@ -947,9 +1176,11 @@ export default function DashboardPage() {
               )
             );
           } else if (payload.eventType === "DELETE") {
-            setReports((prev) =>
-              prev.filter((r) => r.id !== (payload.old as FloodReport).id)
-            );
+            const goneId = (payload.old as FloodReport).id;
+            setReports((prev) => prev.filter((r) => r.id !== goneId));
+            // Positive evidence the row is gone — the only safe moment to drop
+            // its token. (Harmless when the row was someone else's.)
+            forgetSubmission(goneId);
           }
         }
       )
@@ -1000,9 +1231,9 @@ export default function DashboardPage() {
               )
             );
           } else if (payload.eventType === "DELETE") {
-            setSosRequests((prev) =>
-              prev.filter((s) => s.id !== (payload.old as SosRequest).id)
-            );
+            const goneId = (payload.old as SosRequest).id;
+            setSosRequests((prev) => prev.filter((s) => s.id !== goneId));
+            forgetSubmission(goneId);
           }
         }
       )
@@ -1016,11 +1247,15 @@ export default function DashboardPage() {
   }, [fetchAll, showToast]);
 
   /* ── Feed insertions (from the report modal, post-insert) ─────────────── */
+  // Ownership is re-read from storage rather than assumed, so a remove button
+  // appears only when a usable token actually got written — if storage was
+  // unavailable (private mode, quota), no button, which is the honest outcome.
   const handleFloodCreated = useCallback((report: FloodReport) => {
     setReports((prev) => {
       if (prev.some((r) => r.id === report.id)) return prev;
       return [report, ...prev];
     });
+    setOwnedIds(ownedIdSet());
   }, []);
 
   const handleSosCreated = useCallback((sos: SosRequest) => {
@@ -1028,6 +1263,7 @@ export default function DashboardPage() {
       if (prev.some((s) => s.id === sos.id)) return prev;
       return [sos, ...prev];
     });
+    setOwnedIds(ownedIdSet());
   }, []);
 
   // Optimistically flag the report. Status is untouched — only an operator
@@ -1420,7 +1656,15 @@ export default function DashboardPage() {
                     {filteredSos.length === 0 ? (
                       <EmptyState message="No SOS alerts match the current filter criteria." />
                     ) : (
-                      filteredSos.map((s) => <SosCard key={s.id} sos={s} onResolve={handleResolveSos} />)
+                      filteredSos.map((s) => (
+                        <SosCard
+                          key={s.id}
+                          sos={s}
+                          onResolve={handleResolveSos}
+                          owned={ownedIds.has(s.id)}
+                          onWithdrawn={handleWithdrawn}
+                        />
+                      ))
                     )}
                   </div>
                 </div>
@@ -1432,7 +1676,14 @@ export default function DashboardPage() {
                     {filteredReports.length === 0 ? (
                       <EmptyState message="No flood reports match the current filter criteria." />
                     ) : (
-                      filteredReports.map((r) => <FloodReportCard key={r.id} report={r} />)
+                      filteredReports.map((r) => (
+                        <FloodReportCard
+                          key={r.id}
+                          report={r}
+                          owned={ownedIds.has(r.id)}
+                          onWithdrawn={handleWithdrawn}
+                        />
+                      ))
                     )}
                   </div>
                 </div>
@@ -1915,6 +2166,8 @@ export default function DashboardPage() {
                           key={sos.id}
                           sos={sos}
                           onResolve={handleResolveSos}
+                          owned={ownedIds.has(sos.id)}
+                          onWithdrawn={handleWithdrawn}
                           highlighted={sos.id === highlightSosId}
                         />
                       ))
@@ -1938,7 +2191,12 @@ export default function DashboardPage() {
                       <EmptyState message="No matching flood reports." />
                     ) : (
                       filteredReports.map((report) => (
-                        <FloodReportCard key={report.id} report={report} />
+                        <FloodReportCard
+                          key={report.id}
+                          report={report}
+                          owned={ownedIds.has(report.id)}
+                          onWithdrawn={handleWithdrawn}
+                        />
                       ))
                     )}
                   </div>

@@ -14,7 +14,14 @@ import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, isSupabaseConfigured } from "@/lib/supabaseClient";
-import type { Advisory, AdvisoryType, FloodReport, SosRequest } from "@/types/database";
+import type {
+  Advisory,
+  AdvisoryType,
+  FloodReport,
+  SosRequest,
+  WithdrawnKind,
+  WithdrawnSubmission,
+} from "@/types/database";
 import { buildDirectionsUrl, formatRelativeTime } from "@/lib/format";
 import { Loader2 } from "lucide-react";
 
@@ -44,6 +51,57 @@ function SectionHeader({ title, count }: { title: string; count?: number }) {
         <span className="font-mono text-surface-500">{count}</span>
       )}
     </h2>
+  );
+}
+
+/**
+ * Two-step confirm, matching the dashboard's inline pattern.
+ *
+ * Every other control on this page fires immediately, which is fine for
+ * reversible things like Verify or Reopen. Removal is not reversible from here,
+ * so it gets the guard.
+ */
+function ConfirmButton({
+  label,
+  question,
+  onConfirm,
+}: {
+  label: string;
+  question: string;
+  onConfirm: () => void | Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+
+  if (!confirming) {
+    return (
+      <button
+        onClick={() => setConfirming(true)}
+        className="rounded-sm px-2 py-2.5 text-[11px] font-bold uppercase tracking-wider text-surface-500 transition hover:text-surface-200"
+      >
+        {label}
+      </button>
+    );
+  }
+
+  return (
+    <span className="flex flex-1 flex-wrap items-center gap-1.5">
+      <span className="flex-1 text-[10px] text-surface-400">{question}</span>
+      <button
+        onClick={() => {
+          setConfirming(false);
+          void onConfirm();
+        }}
+        className="rounded-sm border border-emergency-600/60 px-2.5 py-2.5 text-[10px] font-bold uppercase tracking-wider text-emergency-300 transition hover:bg-emergency-950/60"
+      >
+        Yes, remove
+      </button>
+      <button
+        onClick={() => setConfirming(false)}
+        className="rounded-sm px-2 py-2.5 text-[10px] font-bold uppercase tracking-wider text-surface-500 transition hover:text-surface-300"
+      >
+        Cancel
+      </button>
+    </span>
   );
 }
 
@@ -149,6 +207,7 @@ export default function AdminPage() {
   const [advisories, setAdvisories] = useState<Advisory[]>([]);
   const [sosRequests, setSosRequests] = useState<SosRequest[]>([]);
   const [reports, setReports] = useState<FloodReport[]>([]);
+  const [withdrawn, setWithdrawn] = useState<WithdrawnSubmission[]>([]);
   const [loadingData, setLoadingData] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -171,6 +230,20 @@ export default function AdminPage() {
   }, []);
 
   /* ── Data fetch + realtime (only while signed in) ─────────────────────── */
+  /**
+   * The withdrawal log. Operator-readable only, and deliberately not in the
+   * realtime publication — it holds the details of people who asked to be taken
+   * off a public page, so it is fetched explicitly rather than broadcast.
+   */
+  const fetchWithdrawn = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("withdrawn_submissions")
+      .select("*")
+      .order("withdrawn_at", { ascending: false })
+      .limit(100);
+    if (!error && data) setWithdrawn(data as WithdrawnSubmission[]);
+  }, []);
+
   const fetchEverything = useCallback(async () => {
     setLoadingData(true);
     const [advRes, sosRes, repRes] = await Promise.all([
@@ -189,6 +262,7 @@ export default function AdminPage() {
   useEffect(() => {
     if (!session) return;
     fetchEverything();
+    fetchWithdrawn();
 
     const channel = supabase
       .channel("admin-realtime")
@@ -200,7 +274,7 @@ export default function AdminPage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [session, fetchEverything]);
+  }, [session, fetchEverything, fetchWithdrawn]);
 
   /* ── Actions ──────────────────────────────────────────────────────────── */
   const publishAdvisory = async (e: React.FormEvent) => {
@@ -270,6 +344,44 @@ export default function AdminPage() {
         prev.map((s) => (s.id === id ? { ...s, rescue_reported_at: null } : s))
       );
     }
+  };
+
+  /**
+   * Take a submission off the public dashboard on someone's behalf.
+   *
+   * This is the safety valve for the one failure the token design cannot avoid:
+   * with no accounts, clearing site data loses the withdrawal token forever.
+   * Without a human fallback there would be no way at all to get a phone number
+   * taken down.
+   *
+   * The row moves to `withdrawn_submissions` rather than being destroyed, so a
+   * removal is still auditable, and it is a real DELETE from the public table so
+   * every open dashboard drops the card via realtime.
+   */
+  const withdrawSubmission = async (kind: WithdrawnKind, id: string) => {
+    setActionError(null);
+    const { data, error } = await supabase.rpc("withdraw_submission", {
+      p_kind: kind,
+      p_id: id,
+      // No token: the operator's authenticated session is the authorisation.
+      p_token: null,
+    });
+
+    if (error) {
+      setActionError(`Removal failed: ${error.message}`);
+      return;
+    }
+    if (data !== true) {
+      setActionError("Removal failed — that row was already gone.");
+    }
+    // Realtime refreshes the lists either way; patch locally so the card goes
+    // immediately rather than a round-trip later.
+    if (kind === "sos") {
+      setSosRequests((prev) => prev.filter((s) => s.id !== id));
+    } else {
+      setReports((prev) => prev.filter((r) => r.id !== id));
+    }
+    fetchWithdrawn();
   };
 
   const setReportVerified = async (id: string, verified: boolean) => {
@@ -512,6 +624,13 @@ export default function AdminPage() {
                           Dismiss Report
                         </button>
                       )}
+                      {/* For someone who lost their device token and asked to be
+                          taken down. Archived, not destroyed. */}
+                      <ConfirmButton
+                        label="Remove"
+                        question="Take this off the public dashboard?"
+                        onConfirm={() => withdrawSubmission("sos", sos.id)}
+                      />
                     </div>
                   </div>
                 ))
@@ -566,13 +685,20 @@ export default function AdminPage() {
                         className="h-24 w-full rounded border border-surface-700 object-cover"
                       />
                     )}
-                    <div className="flex items-center justify-between gap-2 border-t border-surface-800 pt-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-surface-800 pt-2">
                       <span className="font-mono text-[9px] text-surface-500">
                         {r.latitude.toFixed(4)}, {r.longitude.toFixed(4)}
                       </span>
-                      <button onClick={() => setReportVerified(r.id, true)} className={buttonClass}>
-                        Verify
-                      </button>
+                      <span className="flex flex-1 flex-wrap items-center justify-end gap-1.5">
+                        <button onClick={() => setReportVerified(r.id, true)} className={buttonClass}>
+                          Verify
+                        </button>
+                        <ConfirmButton
+                          label="Remove"
+                          question="Take this off the public dashboard?"
+                          onConfirm={() => withdrawSubmission("flood", r.id)}
+                        />
+                      </span>
                     </div>
                   </div>
                 ))
@@ -591,6 +717,48 @@ export default function AdminPage() {
                   </button>
                 </div>
               ))}
+            </div>
+
+            {/* ── Withdrawal log ──────────────────────────────────────────
+                Removals leave the public tables but not the record. Operators
+                only — this holds the details of people who asked to be taken
+                off a public page, so it is never exposed to anon. */}
+            <SectionHeader title="Withdrawn" count={withdrawn.length} />
+            <p className="text-[10px] leading-relaxed text-surface-500">
+              Taken off the dashboard by their author, or by an operator. Kept
+              here as a record; no longer public.
+            </p>
+            <div className="max-h-[260px] space-y-2 overflow-y-auto pr-1">
+              {withdrawn.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-surface-800 py-6 text-center text-xs text-surface-500">
+                  Nothing withdrawn yet.
+                </p>
+              ) : (
+                withdrawn.map((w) => {
+                  const p = w.payload as Record<string, string | number | null>;
+                  const label =
+                    w.kind === "sos"
+                      ? String(p.name ?? "SOS request")
+                      : `${String(p.water_level ?? "flood")} level report`;
+                  return (
+                    <div key={w.id} className="card-glass space-y-1 p-3 opacity-70">
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="min-w-0 truncate text-xs font-bold text-surface-200">
+                          {label}
+                        </span>
+                        <span className="source-chip flex-shrink-0">
+                          {w.withdrawn_by === "author" ? "By author" : "By operator"}
+                        </span>
+                      </div>
+                      <span className="block font-mono text-[9px] text-surface-500">
+                        {w.kind === "sos" ? "SOS" : "Report"} ·{" "}
+                        {formatRelativeTime(w.withdrawn_at)}
+                        {p.phone ? ` · ${String(p.phone)}` : ""}
+                      </span>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </section>
         </div>

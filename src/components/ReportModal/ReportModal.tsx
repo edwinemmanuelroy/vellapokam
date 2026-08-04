@@ -14,6 +14,12 @@ const LocationPickerMap = dynamic(() => import("./LocationPickerMap"), {
   ),
 });
 import type { FloodReport, SosRequest, WaterLevel } from "@/types/database";
+import {
+  hashDeleteToken,
+  isMissingTokenColumn,
+  newDeleteToken,
+  rememberSubmission,
+} from "@/lib/ownership";
 import { X, Loader2, Upload, Check, Crosshair } from "lucide-react";
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -341,18 +347,38 @@ export default function ReportModal({
         imageUrl = upload.url;
       }
 
-      const { data, error } = await supabase
+      // Ownership token — see src/lib/ownership.ts. Minted before the insert so
+      // the hash lands in the same statement as the row, leaving no window in
+      // which a report exists unclaimed. Both helpers return null rather than
+      // throwing: a browser that cannot mint a token still files its report,
+      // it just never gets a remove button.
+      const token = newDeleteToken();
+      const tokenHash = token ? await hashDeleteToken(token) : null;
+
+      const payload = {
+        latitude: floodGeo.lat,
+        longitude: floodGeo.lng,
+        water_level: waterLevel,
+        description: description.trim(),
+        image_url: imageUrl,
+        verified: false,
+      };
+
+      let claimed = Boolean(token && tokenHash);
+      let res = await supabase
         .from("flood_reports")
-        .insert({
-          latitude: floodGeo.lat,
-          longitude: floodGeo.lng,
-          water_level: waterLevel,
-          description: description.trim(),
-          image_url: imageUrl,
-          verified: false,
-        })
+        .insert({ ...payload, delete_token_hash: tokenHash })
         .select()
         .single();
+
+      // Migration 00009 not applied yet — retry without the column rather than
+      // lose the report. See isMissingTokenColumn().
+      if (isMissingTokenColumn(res.error)) {
+        claimed = false;
+        res = await supabase.from("flood_reports").insert(payload).select().single();
+      }
+
+      const { data, error } = res;
 
       if (error) {
         setFormError(error.message);
@@ -363,7 +389,14 @@ export default function ReportModal({
       // database id. Adding a client-generated row here instead would leave a
       // duplicate once the realtime INSERT arrives, and a permanent ghost card
       // whenever the insert failed.
-      if (data) onFloodReportCreated(data as FloodReport);
+      if (data) {
+        // Before the callback, not after: the dashboard derives ownership by
+        // re-reading storage inside it, so the token has to be there already.
+        if (claimed && token) {
+          rememberSubmission({ id: (data as FloodReport).id, kind: "flood", token });
+        }
+        onFloodReportCreated(data as FloodReport);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Network error";
       setFormError(`Connection Error: ${msg}. Make sure your Supabase project URL in .env.local is valid and online.`);
@@ -425,19 +458,35 @@ export default function ReportModal({
     setFormError(null);
 
     try {
-      const { data, error } = await supabase
+      // See the flood path above. Failing to mint a token must never cost
+      // someone their SOS, so both helpers degrade to null.
+      const token = newDeleteToken();
+      const tokenHash = token ? await hashDeleteToken(token) : null;
+
+      const payload = {
+        name: sosName.trim(),
+        phone: sosPhone.trim(),
+        latitude: sosGeo.lat,
+        longitude: sosGeo.lng,
+        people_count: sosPeople,
+        needs: sosNeeds,
+        status: "pending" as const,
+      };
+
+      let claimed = Boolean(token && tokenHash);
+      let res = await supabase
         .from("sos_requests")
-        .insert({
-          name: sosName.trim(),
-          phone: sosPhone.trim(),
-          latitude: sosGeo.lat,
-          longitude: sosGeo.lng,
-          people_count: sosPeople,
-          needs: sosNeeds,
-          status: "pending",
-        })
+        .insert({ ...payload, delete_token_hash: tokenHash })
         .select()
         .single();
+
+      // A missing column must never cost someone their rescue request.
+      if (isMissingTokenColumn(res.error)) {
+        claimed = false;
+        res = await supabase.from("sos_requests").insert(payload).select().single();
+      }
+
+      const { data, error } = res;
 
       if (error) {
         setFormError(error.message);
@@ -446,7 +495,12 @@ export default function ReportModal({
 
       // Added from the server response so the id matches the realtime event —
       // no duplicate card, and no ghost SOS left behind on a failed insert.
-      if (data) onSosCreated(data as SosRequest);
+      if (data) {
+        if (claimed && token) {
+          rememberSubmission({ id: (data as SosRequest).id, kind: "sos", token });
+        }
+        onSosCreated(data as SosRequest);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Network error";
       setFormError(`Connection Error: ${msg}. Make sure your Supabase project URL in .env.local is valid and online.`);
@@ -542,6 +596,13 @@ export default function ReportModal({
                 {tab === "flood"
                   ? "Thank you! Your report helps coordinate relief."
                   : "Help is on the way. Stay safe!"}
+              </p>
+              {/* Sets the "this browser" expectation now, so losing the token
+                  later is understood rather than surprising. Deliberately short
+                  and secondary — nobody in a flood needs a lecture about
+                  browser storage. */}
+              <p className="text-xs text-surface-500">
+                You can remove this from this browser.
               </p>
             </div>
           ) : tab === "flood" ? (
